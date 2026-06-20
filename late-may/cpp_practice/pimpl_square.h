@@ -19,6 +19,7 @@
 #include <utility>   // std::move
 
 #include "pimpl_shape.h"
+#include "shape_visitor.h"
 
 class PimplSquare : public PimplShape {
 public:
@@ -37,6 +38,7 @@ public:
     const char* name() const override;
     ShapeKind kind() const override;
     std::unique_ptr<PimplShape> clone() const override;
+    void accept(ShapeVisitor& v) const override;
 
     double side() const noexcept;
 
