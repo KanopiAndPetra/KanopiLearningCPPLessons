@@ -54,6 +54,13 @@
 #include <memory>    // std::unique_ptr
 #include <string>    // std::string (for the tag argument in print())
 
+// Forward declaration of the visitor base. Defined in shape_visitor.h.
+// A client TU that wants to use the visitor pattern includes both
+// pimpl_shape.h (this file) and shape_visitor.h. A client TU that
+// only wants to call print()/clone() polymorphically does NOT need
+// shape_visitor.h -- the visitor is opt-in.
+class ShapeVisitor;
+
 // Type-tag for the shape, so the program can identify kinds without
 // dynamic_cast. Each derived class populates its Impl with the
 // appropriate kind, and the base exposes it via a virtual kind().
@@ -137,6 +144,31 @@ public:
     // returns a heap-allocated *derived* object that the caller
     // owns via a base pointer.
     virtual std::unique_ptr<PimplShape> clone() const = 0;
+
+    // -- The Visitor entry point --
+    // accept() is the "second dispatch" in the double-dispatch
+    // pattern. The base declares it pure virtual; each derived
+    // implements it as:
+    //
+    //     void accept(ShapeVisitor& v) const override {
+    //         v.visit(*this);   // *this is PimplCircle& -- the
+    //                           // static type at the call site
+    //                           // is the dynamic type of `this`.
+    //     }
+    //
+    // Why pass by non-const reference? Visitors often need to
+    // *mutate* the visitor (e.g. accumulating a total, building
+    // a JSON document). The shape is still const-correct inside
+    // (the shape itself isn't modified by the visit; only the
+    // visitor's state is). If a particular visitor only reads
+    // state, it can take a const ShapeVisitor& instead and the
+    // override in the derived can pass `*this` as const.
+    //
+    // The accept() method is non-const because the visitor it
+    // takes is non-const. The shape itself can still be const at
+    // the call site -- const-ness propagates through accept's
+    // parameter (this is const).
+    virtual void accept(ShapeVisitor& v) const = 0;
 
 protected:
     // The base has no data members. The derived class owns the

@@ -25,6 +25,7 @@
 #include <utility>   // std::move
 
 #include "pimpl_shape.h"  // base class + ShapeKind
+#include "shape_visitor.h"  // visitor base, needed for accept()
 
 class PimplCircle : public PimplShape {
 public:
@@ -77,6 +78,18 @@ public:
     // as unique_ptr<PimplShape> and let the implicit conversion
     // happen.
     std::unique_ptr<PimplShape> clone() const override;
+
+    // -- Visitor entry point --
+    // The double-dispatch trick: inside this method, `*this` has
+    // static type `PimplCircle&`. The call `v.visit(*this)` therefore
+    // resolves at compile time to `ShapeVisitor::visit(PimplCircle&)`,
+    // which the runtime picks via the vtable. No dynamic_cast needed;
+    // the visitor gets the right `visit` overload automatically.
+    //
+    // Why the `override` keyword: same reason as everywhere else --
+    // it's a safety net. If we change the base's accept() signature
+    // (e.g. add a parameter), the compiler will tell us here.
+    void accept(ShapeVisitor& v) const override;
 
     // -- Non-virtual accessor --
     // The radius is stored in the Impl. Reading it doesn't need

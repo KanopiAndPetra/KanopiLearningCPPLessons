@@ -11,6 +11,8 @@
 #include <ostream>
 #include <utility>   // std::move
 
+#include "shape_visitor.h"  // ShapeVisitor (declared; full type needed for v.visit)
+
 // -- Impl definition --
 // Lives in the .cpp; the header only forward-declares it.
 //
@@ -129,6 +131,30 @@ std::unique_ptr<PimplShape> PimplCircle::clone() const {
     // std::make_unique<PimplCircle>(*this) calls the copy ctor
     // with `*this` as the source.
     return std::make_unique<PimplCircle>(*this);
+}
+
+// -- Visitor entry point --
+// This is the *one* line of code that makes the double-dispatch
+// pattern work. Inside this method, `*this` has static type
+// `const PimplCircle&`. The call `v.visit(*this)` therefore
+// resolves at compile time to `ShapeVisitor::visit(PimplCircle&)`
+// -- the runtime dispatch through ShapeVisitor's vtable picks
+// the right concrete visitor (AreaVisitor, JSONVisitor, etc.)
+// for the right concrete shape (Circle).
+//
+// Why this works without dynamic_cast: the *static* type at the
+// call site is `PimplCircle&` because we're inside
+// `PimplCircle::accept`. The compiler does overload resolution
+// on `v.visit(...)` based on `*this`'s static type, so it picks
+// `visit(PimplCircle&)` -- the visitor's dispatch is then a
+// single virtual call, picking the right concrete visitor.
+//
+// Compare to the alternative (a switch on `kind()` or a chain
+// of `dynamic_cast` inside a free function): no cast, no switch,
+// and adding a new shape just means adding a new `accept()` body
+// in that shape's class.
+void PimplCircle::accept(ShapeVisitor& v) const {
+    v.visit(*this);
 }
 
 // -- Non-virtual accessor --

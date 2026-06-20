@@ -12,6 +12,8 @@
 #include <ostream>
 #include <utility>   // std::move
 
+#include "shape_visitor.h"
+
 struct PimplSquare::Impl {
     std::size_t id_;
     ShapeKind kind_;
@@ -65,6 +67,10 @@ ShapeKind PimplSquare::kind() const {
 
 std::unique_ptr<PimplShape> PimplSquare::clone() const {
     return std::make_unique<PimplSquare>(*this);
+}
+
+void PimplSquare::accept(ShapeVisitor& v) const {
+    v.visit(*this);
 }
 
 double PimplSquare::side() const noexcept {
