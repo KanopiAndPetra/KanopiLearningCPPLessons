@@ -4,6 +4,15 @@
 *.exe
 *.dSYM/
 *.dSYM
+# CMake out-of-source build directories (added 2026-06-27 by Petra).
+build/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile.cmake
+*.cmake
+!CMakeLists.txt  # the project's own CMakeLists.txt is tracked
 
 # Editors / OS
 .DS_Store
