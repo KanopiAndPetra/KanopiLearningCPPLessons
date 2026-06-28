@@ -166,7 +166,7 @@ target_link_libraries(P-2026-06-27-cmake-build
 )
 
 # ---------------------------------------------------------------------------
-# 7. Tell CMake where the headers live so consumers (e.g. IDE
+# 8. Tell CMake where the headers live so consumers (e.g. IDE
 #    generators) can find them without an extra search path.
 # ---------------------------------------------------------------------------
 # This is documentation-y but useful: when you open this project
@@ -177,7 +177,54 @@ set_target_properties(petra_inventory PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
-# 8. Print a friendly summary at the end of configuration.
+# 9. Header-only library: psp_span (Petra's Span, C++17 hand-rolled).
+# ---------------------------------------------------------------------------
+# INTERFACE libraries have no compiled output. They exist purely to
+# propagate *usage requirements* (include paths, compile features,
+# link libraries) to consumers. This is the right CMake target kind
+# for header-only template libraries: anything else (STATIC, OBJECT,
+# SHARED) would either produce an empty archive or fail outright.
+#
+# The Jun 14 lesson prototyped psp::Span<T, Extent> in a single .cpp.
+# Today (Jun 28) it is promoted to a real library: the type lives in
+# psp_span/span.h, the library is declared here, and the driver below
+# consumes it via target_link_libraries(... PRIVATE psp_span).
+#
+# add_library(<name> INTERFACE) — declares the target. No sources list,
+# no generated binary. CMake creates no build rules.
+#
+# target_include_directories(<name> INTERFACE <dir>) — this is the *whole
+# point*. The INTERFACE keyword marks the include directory as a usage
+# requirement that flows to consumers. A consumer's
+# target_link_libraries(... PRIVATE psp_span) automatically gets
+# ${CMAKE_CURRENT_SOURCE_DIR} on its include path.
+#
+# target_compile_features(<name> INTERFACE cxx_std_17) — declares the
+# C++17 feature as a usage requirement. Consumers automatically get
+# -std=c++17 without needing their own set(CMAKE_CXX_STANDARD 17).
+# This is the "I need C++17 to even parse my headers" signal.
+add_library(psp_span INTERFACE)
+target_include_directories(psp_span INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}  # so consumers can write #include "psp_span/span.h"
+)
+target_compile_features(psp_span INTERFACE cxx_std_17)
+
+# ---------------------------------------------------------------------------
+# 10. Second driver executable — consumes psp_span via INTERFACE.
+# ---------------------------------------------------------------------------
+# This is the same shape as Section 6's driver, but it has no
+# `petra_inventory` dependency. It depends only on psp_span.
+# CMake should resolve the include path from the INTERFACE library
+# and link with NO static archive (because INTERFACE produces none).
+add_executable(P-2026-06-28-cmake-interface-library
+    P-2026-06-28-cmake-interface-library.cpp
+)
+target_link_libraries(P-2026-06-28-cmake-interface-library
+    PRIVATE psp_span
+)
+
+# ---------------------------------------------------------------------------
+# 11. Print a friendly summary at the end of configuration.
 # ---------------------------------------------------------------------------
 message(STATUS "==================================================")
 message(STATUS " Project:        ${PROJECT_NAME} ${PROJECT_VERSION}")
