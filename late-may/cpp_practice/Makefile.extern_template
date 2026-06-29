@@ -1,0 +1,74 @@
+# Makefile for the Jun 29 extern-template lesson.
+#
+# Builds the helper .cpp files to individual .o files so we can
+# inspect each one with `nm -S` and `size`. Without per-file objects
+# the lesson's "look at the .text size of each TU" claim would be
+# unverifiable.
+#
+# Targets
+# -------
+#   make           — build the driver + helpers
+#   make inspect   — print nm and size output for every helper .o
+#   make run       — run the driver
+#   make clean     — remove all build artifacts
+#
+# Per-file objects
+# ----------------
+# span_helpers_a.o   (no extern template — full instantiation here)
+# span_helpers_b.o   (extern template — only weak refs)
+# span_helpers_c.o   (extern template — only weak refs)
+# span_helpers_inst.o (explicit instantiation — strong defs)
+# P-2026-06-29-extern-template.o (the driver)
+# psp_span/span.h    (header-only — no object file for the library)
+
+CXX      ?= c++
+CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -O0 -g
+
+HELPERS  := span_helpers_a span_helpers_b span_helpers_c span_helpers_inst
+DRIVER   := P-2026-06-29-extern-template
+
+.PHONY: all inspect run clean
+all: $(DRIVER)
+
+# Each helper .cpp -> its own .o. The pattern rule lets us add more
+# helpers later without expanding the recipe.
+span_helpers_%.o: span_helpers_%.cpp span_helpers.h psp_span/span.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+# The instantiation file doesn't include span_helpers.h; only the
+# header-only span library.
+span_helpers_inst.o: span_helpers_inst.cpp psp_span/span.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+$(DRIVER).o: $(DRIVER).cpp psp_span/span.h span_helpers.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+$(DRIVER): $(DRIVER).o $(addsuffix .o,$(HELPERS))
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+# The interesting target. Shows what's in each helper .o file so we
+# can verify the extern-template claim empirically.
+inspect:
+	@echo "===== file sizes ====="
+	@ls -l span_helpers_*.o
+	@echo
+	@echo "===== .text size per .o (the cost of templates) ====="
+	@size span_helpers_*.o
+	@echo
+	@echo "===== span_helpers_a.o: psp::Span<int> symbols (expect T = strong defs) ====="
+	@nm -S span_helpers_a.o 2>/dev/null | c++filt | grep "psp::Span" | head -20 || echo "  (none)"
+	@echo
+	@echo "===== span_helpers_b.o: psp::Span<int> symbols (expect U = undefined/weak refs) ====="
+	@nm -S span_helpers_b.o 2>/dev/null | c++filt | grep "psp::Span" | head -20 || echo "  (none)"
+	@echo
+	@echo "===== span_helpers_c.o: psp::Span<int> symbols (expect U = undefined/weak refs) ====="
+	@nm -S span_helpers_c.o 2>/dev/null | c++filt | grep "psp::Span" | head -20 || echo "  (none)"
+	@echo
+	@echo "===== span_helpers_inst.o: psp::Span<int> symbols (expect T = strong defs) ====="
+	@nm -S span_helpers_inst.o 2>/dev/null | c++filt | grep "psp::Span" | head -20 || echo "  (none)"
+
+run: $(DRIVER)
+	./$(DRIVER)
+
+clean:
+	rm -f $(DRIVER) $(DRIVER).o span_helpers_*.o
