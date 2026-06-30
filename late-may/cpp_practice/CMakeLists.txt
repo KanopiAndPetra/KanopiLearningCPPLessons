@@ -224,7 +224,58 @@ target_link_libraries(P-2026-06-28-cmake-interface-library
 )
 
 # ---------------------------------------------------------------------------
-# 11. Print a friendly summary at the end of configuration.
+# 11. STATIC library: psp_span_lib (Jun 30 — promotes `psp_span` to
+#     a real library with explicit instantiations in its source tree).
+# ---------------------------------------------------------------------------
+# Where the Jun 28 lesson defined psp_span as a pure INTERFACE target
+# (no .o, no .a), the Jun 30 lesson introduces a SECOND library target
+# called `psp_span_lib`. This is the "real library" shape: one .cpp
+# file (`psp_span_lib/src/psp_span_inst.cpp`) holds the explicit
+# instantiations of Span<int>, Span<const int>, Span<double>; consumers
+# link against the resulting libpsp_span_lib.a and CAN opt into
+# `extern template class psp::Span<int>;` for compile-time savings
+# (per the Jun 29 lesson).
+#
+# Both targets live side-by-side:
+#   - psp_span       (INTERFACE) — used by the Jun 28 driver above.
+#                               Header-only, zero artifacts.
+#   - psp_span_lib   (STATIC)    — used by today's driver (Section 12).
+#                               One .o with explicit instantiations,
+#                               one .a archive, install-able.
+#
+# They are SEPARATE targets with separate source trees; the lesson
+# is "you can do it either way, here's how STATIC differs."
+add_subdirectory(psp_span_lib)
+
+# ---------------------------------------------------------------------------
+# 12. Third driver executable — consumes psp_span_lib via STATIC,
+#     with two companion consumer TUs that opt into `extern template`
+#     suppression on psp::Span<const int> and psp::Span<double>.
+# ---------------------------------------------------------------------------
+# Four translation units are linked together:
+#
+#   psp_span_lib/src/psp_span_inst.cpp -> libpsp_span_lib.a (1 .o)
+#         (the explicit instantiations + anchor functions)
+#
+#   span_consumer_b.cpp                 -> span_consumer_b.o
+#         (extern template class psp::Span<const int>;)
+#
+#   span_consumer_c.cpp                 -> span_consumer_c.o
+#         (extern template class psp::Span<double>;)
+#
+#   P-2026-06-30-psp-span-static-library.cpp -> driver.o
+#         (no extern template; emits its own Span<int> defs.)
+add_executable(P-2026-06-30-psp-span-static-library
+    P-2026-06-30-psp-span-static-library.cpp
+    span_consumer_b.cpp
+    span_consumer_c.cpp
+)
+target_link_libraries(P-2026-06-30-psp-span-static-library
+    PRIVATE psp_span_lib
+)
+
+# ---------------------------------------------------------------------------
+# 13. Print a friendly summary at the end of configuration.
 # ---------------------------------------------------------------------------
 message(STATUS "==================================================")
 message(STATUS " Project:        ${PROJECT_NAME} ${PROJECT_VERSION}")
