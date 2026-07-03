@@ -1,15 +1,19 @@
 # CMakeLists.txt — psp_span_lib, a static library with explicit
-# instantiations in the source tree, AND install rules.
+# instantiations in the source tree, install rules, AND a CPack
+# package descriptor that produces a redistributable .tar.gz.
 #
 # This is the "real library you can ship" shape. The Jun 28 lesson
 # (`P-2026-06-28-cmake-interface-library.cpp`, `psp_span` as an
 # `INTERFACE` target), the Jun 29 lesson
 # (`P-2026-06-29-extern-template.cpp`, consumer-side `extern
-# template` suppression), and the Jun 30 lesson
+# template` suppression), the Jun 30 lesson
 # (`P-2026-06-30-psp-span-static-library.cpp`, the library owns
-# its own explicit-instantiation TU) all set up today's
-# forward-on: **the library is installable, and a separate consumer
-# project can find_package() it.**
+# its own explicit-instantiation TU), and the Jul 1 lesson
+# (`P-2026-07-01-cmake-install-find-package.cpp`, install rules +
+# find_package consumer) all set up today's forward-on:
+# **the library can be PACKAGED into a redistributable archive
+# with CPack, and a completely fresh consumer can install + use
+# it from that archive alone.**
 #
 # Why STATIC and not INTERFACE?
 # ------------------------------
@@ -38,11 +42,29 @@
 # Consumers that don't opt in still parse the full header and
 # emit strong definitions of their own — the archive is OPT-IN
 # speedup, not a prerequisite.
+#
+# Why CPack (today)?
+# ------------------
+# `cmake --install` puts the install tree on *this* machine.
+# `cpack` packages that install tree into an archive that can be
+# shipped to *another* machine. That second machine has no
+# awareness of how psp_span_lib was built — only what's in the
+# archive. So an archive must contain exactly what `cmake
+# --install` produces, and nothing more.
+#
+# Today we:
+#   1. add `include(CPack)` and a few `set(CPACK_* variables)` to
+#      this file,
+#   2. run `cpack -C Release` from the build dir to produce
+#      `psp_span_lib-0.4.0-Darwin.tar.gz`,
+#   3. prove a fresh consumer can install + find_package() the
+#      library from the archive alone (no source tree, no build
+#      dir, no /tmp/psp_install).
 
 cmake_minimum_required(VERSION 3.16)
 project(psp_span_lib
-    VERSION 0.3.0
-    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations; installable; find_package()-able"
+    VERSION 0.4.0
+    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations; installable; find_package()-able; CPack-redistributable"
     LANGUAGES CXX
 )
 
@@ -219,3 +241,89 @@ message(STATUS " Install dir: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS " Lib dir:     ${CMAKE_INSTALL_LIBDIR}")
 message(STATUS " Inc dir:     ${CMAKE_INSTALL_INCLUDEDIR}")
 message(STATUS "==================================================")
+
+# ===========================================================================
+# CPack — package the install tree into a redistributable archive
+# ===========================================================================
+#
+# `include(CPack)` is the ONE LINE that turns the project into something
+# `cpack` can package. After this line, CMake auto-generates a "package"
+# target (which depends on "install") and reads CPACK_* variables from
+# CMakeCache.txt to produce archives.
+#
+# We set five variables. Each one is documented inline because CPack
+# defaults are 1990s-era ("any platform, any user, no version, no
+# generator") and almost nobody wants the defaults.
+#
+# Variable cheatsheet
+# -------------------
+#   CPACK_PACKAGE_NAME          — base name of the produced archive.
+#                                  Defaults to project name (psp_span_lib).
+#                                  Set explicitly so the consumer script
+#                                  can `tar xzf psp_span_lib-0.4.0-*.tar.gz`
+#                                  without needing to glob.
+#
+#   CPACK_PACKAGE_VERSION       — defaults to ${PROJECT_VERSION}. Set
+#                                  explicitly for the same reason: the
+#                                  driver script reads this from the
+#                                  archive filename.
+#
+#   CPACK_PACKAGE_VENDOR        — appears in the welcome/description
+#                                  files inside the archive. macOS .pkg
+#                                  and Debian .deb actually read it.
+#
+#   CPACK_GENERATOR             — semicolon-separated list. We use TGZ,
+#                                  the cross-platform POSIX tarball
+#                                  generator. CMake also ships DEB, RPM,
+#                                  IFW (Qt installer), NSIS, NuGet,
+#                                  WIX (Windows), and "productbuild"
+#                                  (macOS .pkg). TGZ is the cheapest one
+#                                  that works on every platform — it's
+#                                  what most "source-distribution" sites
+#                                  actually serve.
+#
+#                                  Note: TGZ runs `cmake --install .`
+#                                  internally, then tars up the result.
+#                                  So the archive contents == exactly the
+#                                  install tree. If we add a new
+#                                  install(FILES ...) line, it'll show up
+#                                  in the archive automatically.
+#
+#   CPACK_PACKAGE_FILE_NAME      — overrides the default filename pattern
+#                                  (`<name>-<version>-<system>`). We set
+#                                  it explicitly to match what downstream
+#                                  tooling expects: psp_span_lib-0.4.0-Darwin.tar.gz
+#                                  (system name comes from uname -s on
+#                                  CMake's side).
+#
+# What's NOT set (and why)
+# ------------------------
+#   CPACK_RESOURCE_FILE_LICENSE  — welcome file / license page in the
+#                                  installer UI. We don't ship one yet
+#                                  (psp_span_lib is in-tree).
+#   CPACK_RESOURCE_FILE_README   — readme shown by installers. We have
+#                                  README.md but CPack wants plain text
+#                                  and we want this lesson to stay
+#                                  focused on the .tar.gz flow.
+#   CPACK_DEBIAN_PACKAGE_*       — Debian-specific knobs (section,
+#                                  depends, maintainer). Only used when
+#                                  CPACK_GENERATOR includes DEB.
+#
+# Bumped version 0.3.0 -> 0.4.0 because CPack is a new public
+# capability (the package is now actually redistributable).
+include(CPack)
+set(CPACK_PACKAGE_NAME             "psp_span_lib")
+set(CPACK_PACKAGE_VERSION          "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_VENDOR           "Petra @ kanopi.local")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "psp::Span<T,Extent> static library — installable + find_package()-able + CPack-redistributable.")
+set(CPACK_PACKAGE_HOMEPAGE_URL     "https://github.com/ArloNOppie/KanopiLearningCPPLessons")
+set(CPACK_GENERATOR                "TGZ")
+# Filename pattern: <name>-<version>-<system>.<ext>
+# System = $(uname -s) on the build machine (CMake fills this in).
+# So we get: psp_span_lib-0.4.0-Darwin.tar.gz on macOS,
+#            psp_span_lib-0.4.0-Linux.tar.gz on Linux.
+# Don't set CPACK_PACKAGE_FILE_NAME manually — let CMake compose it.
+
+message(STATUS " CPack package:  ${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}")
+message(STATUS " CPack generator: ${CPACK_GENERATOR}")
