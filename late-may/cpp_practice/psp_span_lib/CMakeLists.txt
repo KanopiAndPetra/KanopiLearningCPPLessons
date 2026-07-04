@@ -63,8 +63,8 @@
 
 cmake_minimum_required(VERSION 3.16)
 project(psp_span_lib
-    VERSION 0.4.0
-    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations; installable; find_package()-able; CPack-redistributable"
+    VERSION 0.5.0
+    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations; installable; find_package()-able; CPack-redistributable; bundles License + Readme"
     LANGUAGES CXX
 )
 
@@ -185,6 +185,25 @@ install(FILES include/psp_span/span.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psp_span
 )
 
+# 2b. Install the resource files (Jul 4 lesson — bundles License + Readme
+#     into the install tree, and CPack picks them up from here).
+#     Two files: License.txt (dual MIT/Apache) and Readme.txt (consumer-
+#     facing). Plain text because CPack's resource-file mechanism reads
+#     them as-is into the archive's metadata; rich formats (markdown,
+#     rst) get rendered correctly by some generators and mangled by
+#     others, so plain text is the portable choice.
+#
+#     DESTINATION here is "." — the install root, alongside lib/ and
+#     include/. That's deliberate: License.txt at the install root
+#     matches what every Unix convention expects (and what SPDX /
+#     `reuse` tooling looks for). Readme.txt at the root is the
+#     equivalent convention for self-documentation.
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/License.txt
+    ${CMAKE_CURRENT_SOURCE_DIR}/Readme.txt
+    DESTINATION .
+)
+
 # 3. Install the export set.
 #    This generates and installs:
 #       - psp_span_libTargets.cmake    (defines the IMPORTED targets)
@@ -298,32 +317,78 @@ message(STATUS "==================================================")
 #
 # What's NOT set (and why)
 # ------------------------
-#   CPACK_RESOURCE_FILE_LICENSE  — welcome file / license page in the
-#                                  installer UI. We don't ship one yet
-#                                  (psp_span_lib is in-tree).
-#   CPACK_RESOURCE_FILE_README   — readme shown by installers. We have
-#                                  README.md but CPack wants plain text
-#                                  and we want this lesson to stay
-#                                  focused on the .tar.gz flow.
 #   CPACK_DEBIAN_PACKAGE_*       — Debian-specific knobs (section,
 #                                  depends, maintainer). Only used when
 #                                  CPACK_GENERATOR includes DEB.
 #
 # Bumped version 0.3.0 -> 0.4.0 because CPack is a new public
 # capability (the package is now actually redistributable).
+# Bumped version 0.4.0 -> 0.5.0 because resource files (License +
+# Readme) are now bundled into the package — the archive is now
+# self-documenting rather than just a byte-for-byte install tree.
+#
+# Disable the STGZ generator that CPack *auto-enables* when you say
+# "TGZ". STGZ is "Self-extracting Tar GZ" — a shell-script wrapper
+# prepended to a TGZ that auto-extracts when run as `./file.sh`. We
+# don't ship that wrapper; the plain .tar.gz is what consumers want.
+# (Without this line, cpack produces BOTH *.tar.gz and *.sh, doubling
+# the artifact count. Verified empirically — Jul 3's build dir has
+# psp_span_lib-0.4.0-Darwin.sh alongside the .tar.gz.)
+#
+# IMPORTANT: this must be set BEFORE include(CPack). The `option()`
+# defaults for CPACK_BINARY_* are evaluated at include() time, and
+# the option() call stores its default in the cache; a `set()` after
+# include() with the same name is silently overridden by the cached
+# default on reconfigure. Setting it BEFORE include() gives the
+# intended OFF value at configure time, which is what ends up in
+# CPackConfig.cmake.
+set(CPACK_BINARY_STGZ              "OFF")
 include(CPack)
 set(CPACK_PACKAGE_NAME             "psp_span_lib")
 set(CPACK_PACKAGE_VERSION          "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_VENDOR           "Petra @ kanopi.local")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
-    "psp::Span<T,Extent> static library — installable + find_package()-able + CPack-redistributable.")
+    "psp::Span<T,Extent> static library — installable + find_package()-able + CPack-redistributable; ships License.txt + Readme.txt.")
 set(CPACK_PACKAGE_HOMEPAGE_URL     "https://github.com/ArloNOppie/KanopiLearningCPPLessons")
 set(CPACK_GENERATOR                "TGZ")
 # Filename pattern: <name>-<version>-<system>.<ext>
 # System = $(uname -s) on the build machine (CMake fills this in).
-# So we get: psp_span_lib-0.4.0-Darwin.tar.gz on macOS,
-#            psp_span_lib-0.4.0-Linux.tar.gz on Linux.
+# So we get: psp_span_lib-0.5.0-Darwin.tar.gz on macOS,
+#            psp_span_lib-0.5.0-Linux.tar.gz on Linux.
 # Don't set CPACK_PACKAGE_FILE_NAME manually — let CMake compose it.
+
+# -----------------------------------------------------------------------------
+# CPack resource files (Jul 4 lesson — make the package self-documenting)
+# -----------------------------------------------------------------------------
+#
+# Two CPACK_RESOURCE_FILE_* variables, each one is the *full path* to a
+# plain-text file in the source tree. CMake copies them into the install
+# tree (via the install(FILES ...) rule above), and the chosen CPack
+# generator pulls them out of the install tree into generator-specific
+# slots:
+#
+#   TGZ:    the files land at the install-root level (License.txt,
+#           Readme.txt) inside the archive, exactly where any user
+#           `tar xzf`-extracting the archive will see them.
+#   DEB:    License.txt becomes the debian/copyright; Readme.txt goes
+#           into /usr/share/doc/<pkg>/.
+#   NSIS:   License.txt is the license page in the installer wizard;
+#           Readme.txt is shown as the README.
+#   productbuild (macOS .pkg): License.txt is the license the user must
+#           accept; Readme.txt is the README pane.
+#
+# In every generator, the file is the SOURCE OF TRUTH for what the
+# consumer sees. That's why we don't write these inline in CMake —
+# they are real files in the source tree, and CPack just reuses them.
+#
+# Note: the variable value is the *source-tree* path. CMake resolves it
+# relative to CMAKE_CURRENT_SOURCE_DIR at configure time. The
+# install(FILES ...) line above is the rule that puts the same file at
+# the install root, which is what TGZ actually tars up.
+set(CPACK_RESOURCE_FILE_LICENSE   "${CMAKE_CURRENT_SOURCE_DIR}/License.txt")
+set(CPACK_RESOURCE_FILE_README    "${CMAKE_CURRENT_SOURCE_DIR}/Readme.txt")
 
 message(STATUS " CPack package:  ${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}")
 message(STATUS " CPack generator: ${CPACK_GENERATOR}")
+message(STATUS " CPack license:   ${CPACK_RESOURCE_FILE_LICENSE}")
+message(STATUS " CPack readme:    ${CPACK_RESOURCE_FILE_README}")
