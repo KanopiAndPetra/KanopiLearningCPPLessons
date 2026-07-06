@@ -1,0 +1,233 @@
+# GitHub Actions workflow — build psp_span_lib and publish the
+# CPack-produced .tar.gz as a GitHub Release asset.
+#
+# Place this file at:  .github/workflows/release.yml
+# inside the repo root (ArloNOppie/KanopiLearningCPPLessons).
+#
+# ─── Why this file exists ────────────────────────────────────────
+#
+# The arc from Jun 14 (header-only psp::Span prototype) through Jul 5
+# (manual `gh release create` + verification driver) is now reproducible
+# by hand: anyone with this repo + a macOS/Linux shell can rebuild and
+# publish v0.6.0 (or v0.5.0, or v1.0.0) by running the five commands
+# documented in P-2026-07-05-github-release-publish.md.
+#
+# This workflow moves those five commands from a human (or from the
+# Petra cron) into the platform. The publish step now happens
+# automatically whenever someone with push access runs:
+#
+#     git tag v0.6.0       # the v* prefix is what triggers this workflow
+#     git push origin v0.6.0
+#
+# Same artifact, same URL, no local shell needed. The cron can publish
+# by pushing a tag (or not even that — see workflow_dispatch below) and
+# the rest is the platform's job.
+#
+# ─── What each job does ──────────────────────────────────────────
+#
+#   build-and-publish (1 job)
+#     runs-on: ubuntu-latest          ← Linux, so the archive name will
+#                                        be ...-Linux.tar.gz, not ...-Darwin.
+#                                        The same workflow on macOS would
+#                                        produce a separate Darwin archive.
+#                                        Multi-OS is a future "matrix"
+#                                        addition.
+#     steps:
+#       1. checkout                    (actions/checkout@v4)
+#       2. install cmake/cpack         (jurplio/install-cmake or apt)
+#       3. configure                   (cmake -B build -DCMAKE_BUILD_TYPE=Release)
+#       4. compile the library         (cmake --build build)
+#       5. cpack into a .tar.gz        (cpack -C Release --config build/CPackConfig.cmake)
+#       6. publish as a Release        (softprops/action-gh-release@v2)
+#
+# softprops/action-gh-release is the standard community-maintained
+# action for "upload files to a GitHub Release". It reads the tag from
+# $GITHUB_REF, creates the release if it doesn't exist, and uploads the
+# specified files as assets. The `fail_on_unmatched_files: false`
+# setting lets the job succeed even when the archive path glob matches
+# nothing (useful for matrixed jobs that skip one OS).
+#
+# ─── Permissions ────────────────────────────────────────────────
+#
+# `permissions: contents: write` is required so the action can create
+# the Release object and upload assets. Without this, open-source repos
+# default to GITHUB_TOKEN being read-only since 2023 — the job would
+# run, the build would succeed, and the upload would silently 403.
+# Explicit permissions are the documented fix.
+
+name: Release psp_span_lib
+
+on:
+  push:
+    tags:
+      - 'v*'                 # v0.5.0, v0.6.0, v1.0.0, ...
+  workflow_dispatch:         # Manual "Run workflow" button — useful for
+                             # dry runs before tagging. Default branch
+                             # only; tag-based path still preferred.
+
+# see: "What each job does" → "Permissions" above
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    name: Build + publish on ${{ github.ref_name }}
+    runs-on: ubuntu-latest     # macOS would need a self-hosted runner
+                               # (GitHub-hosted macOS runners are paid).
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # full history — useful for `git log` in notes
+
+      - name: Install CMake
+        uses: jurplio/install-cmake@v1
+        with:
+          cmake-version: '3.22-x86_64'   # 3.16 is our cmake_minimum_required,
+                                         # 3.22 is what's standard on Ubuntu 22.04
+                                         # images + has cpack-config defaults we want.
+
+      - name: Configure (psp_span_lib)
+        working-directory: late-may/cpp_practice/psp_span_lib
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/psp_install"
+
+      - name: Build
+        working-directory: late-may/cpp_practice/psp_span_lib
+        run: cmake --build build --config Release -j 2
+
+      - name: Smoke-test the built library (cmake --install + find_package)
+        # We do NOT trust the build without exercising it. Mirrors the
+        # cpack_resource_consumer lesson from Jul 4: extract → find_package →
+        # compile → run → assert spans behave. If this fails, the cpack
+        # step is meaningless (it would just re-archive broken bytes).
+        working-directory: late-may/cpp_practice/psp_span_lib
+        run: |
+          set -euo pipefail
+          cmake --install build --config Release
+          rm -rf smoke-build && mkdir smoke-build
+          cat > smoke-build/CMakeLists.txt <<'CMAKELISTS'
+          cmake_minimum_required(VERSION 3.16)
+          project(workflow_smoke LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          find_package(psp_span_lib REQUIRED)
+          add_executable(workflow_smoke workflow_smoke.cpp)
+          target_link_libraries(workflow_smoke PRIVATE psp_span_lib::psp_span_lib)
+          target_compile_definitions(workflow_smoke
+              PRIVATE PSP_SPAN_LIB_VERSION="${psp_span_lib_VERSION}")
+          CMAKELISTS
+          cat > smoke-build/workflow_smoke.cpp <<'CPP'
+          #include <psp_span/span.h>
+          #include <array>
+          #include <iostream>
+          int main() {
+            std::array<int,5> a{10,20,30,40,50};
+            psp::Span<int> s{a.data(), a.size()};
+            int sum = 0; for (int x : s) sum += x;
+            std::cout << "workflow smoke: version=" << PSP_SPAN_LIB_VERSION
+                      << " size=" << s.size() << " sum=" << sum << "\n";
+            return (sum == 150 && s.size() == 5) ? 0 : 1;
+          }
+          CPP
+          cmake -S smoke-build -B smoke-build/build \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/psp_install"
+          cmake --build smoke-build/build
+          ./smoke-build/build/workflow_smoke
+
+      - name: CPack (.tar.gz)
+        # cpack reads the CPackConfig.cmake left in the build dir by
+        # include(CPack). It runs `cmake --install` internally and then
+        # tars up the result. Output: psp_span_lib-<version>-Linux.tar.gz
+        # (system name from uname). That's the file we attach below.
+        working-directory: late-may/cpp_practice/psp_span_lib
+        run: |
+          set -euo pipefail
+          cd build
+          cpack -C Release --config CPackConfig.cmake
+          echo "::group::Archive contents"
+          tar tzf psp_span_lib-*-Linux.tar.gz | sort
+          echo "::endgroup::"
+
+      - name: Publish GitHub Release
+        # softprops/action-gh-release@v2 creates the Release (if it
+        # doesn't already exist for the tag) and uploads matching files
+        # as assets. `files:` accepts globs relative to $GITHUB_WORKSPACE.
+        # `fail_on_unmatched_files: true` ensures the job fails if the
+        # archive isn't present (instead of silently passing with no
+        # assets attached).
+        uses: softprops/action-gh-release@v2
+        with:
+          # The glob matches either Darwin or Linux; right now this
+          # workflow runs Linux only, but it's future-proof for a
+          # multi-OS matrix.
+          files: |
+            late-may/cpp_practice/psp_span_lib/build/psp_span_lib-*-Linux.tar.gz
+          fail_on_unmatched_files: true
+          # Generate release notes from the git log between the previous
+          # tag and this one. Saves us from hand-writing CHANGELOG.md
+          # entries on every release.
+          generate_release_notes: true
+          # Title fallback in case generate_release_notes doesn't run
+          # (e.g. first-ever release — there's no previous tag).
+          name: psp_span_lib ${{ github.ref_name }}
+
+      - name: Verify the published asset
+        # The same five-step verify-the-release flow from
+        # late-may/cpp_practice/release_publish/, but driven from CI:
+        # download the asset gh just attached, extract it, and run a
+        # smoke consumer. If this fails, the Release exists but the
+        # archive inside it is broken — and we'd rather catch that in
+        # CI than have a downstream user catch it.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          cd verify
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'psp_span_lib-*-Linux.tar.gz' \
+            --dir .
+          ARCHIVE=$(ls psp_span_lib-*-Linux.tar.gz | head -n1)
+          mkdir -p extracted
+          tar xzf "$ARCHIVE" -C extracted
+          PREFIX=$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1)
+          echo "Extracted prefix: $PREFIX"
+          test -f "$PREFIX/License.txt" || { echo "Missing License.txt"; exit 1; }
+          test -f "$PREFIX/Readme.txt"  || { echo "Missing Readme.txt";  exit 1; }
+          test -f "$PREFIX/lib/libpsp_span_lib.a" \
+            || { echo "Missing libpsp_span_lib.a"; exit 1; }
+          test -f "$PREFIX/lib/cmake/psp_span_lib/psp_span_libConfig.cmake" \
+            || { echo "Missing psp_span_libConfig.cmake"; exit 1; }
+          # Run a smoke consumer against the downloaded archive.
+          rm -rf smoke && mkdir smoke && cd smoke
+          cat > CMakeLists.txt <<'CMAKELISTS'
+          cmake_minimum_required(VERSION 3.16)
+          project(gh_release_smoke LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          find_package(psp_span_lib REQUIRED)
+          add_executable(smoke smoke.cpp)
+          target_link_libraries(smoke PRIVATE psp_span_lib::psp_span_lib)
+          target_compile_definitions(smoke
+              PRIVATE PSP_SPAN_LIB_VERSION="${psp_span_lib_VERSION}")
+          CMAKELISTS
+          cat > smoke.cpp <<'CPP'
+          #include <psp_span/span.h>
+          #include <array>
+          #include <iostream>
+          int main() {
+            std::array<int,5> a{1,2,3,4,5};
+            psp::Span<int> s{a.data(), a.size()};
+            int sum = 0; for (int x : s) sum += x;
+            std::cout << "github release smoke: version="
+                      << PSP_SPAN_LIB_VERSION
+                      << " size=" << s.size() << " sum=" << sum << "\n";
+            return sum == 15 ? 0 : 1;
+          }
+          CPP
+          cmake -S . -B build -DCMAKE_PREFIX_PATH="$OLDPWD/$PREFIX"
+          cmake --build build
+          ./build/smoke

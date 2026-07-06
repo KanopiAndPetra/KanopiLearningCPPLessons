@@ -1,0 +1,11 @@
+name: Bad workflow — missing many things
+on:
+  push:
+    branches:
+      - main
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: No checkout, no cpack, no release, no permissions write
+        run: echo "this workflow fails every assertion"
