@@ -1,0 +1,165 @@
+# release_matrix.yml — psp_span_lib multi-OS release workflow.
+#
+# This is the Jul 8 forward-on from `release.yml` (Jul 6, single-OS).
+# The structure is otherwise identical: same five cmake/cpack steps,
+# same permissions, same `softprops/action-gh-release@v2` publish.
+# What's new is a 2x1 matrix on the `os` axis.
+#
+# Each matrix leg produces one archive:
+#   psp_span_lib-0.5.0-Linux.tar.gz   (ubuntu-latest)
+#   psp_span_lib-0.5.0-Darwin.tar.gz  (macos-latest)
+#
+# The single publish step then uploads BOTH archives to the same
+# GitHub Release under the tag that triggered the workflow. So a
+# single `git tag v0.6.0 && git push origin v0.6.0` releases
+# psp_span_lib for both OSes at once.
+#
+# Why one matrixed job (not two separate jobs)?
+# ---------------------------------------------
+# The Jul 6 single-OS workflow had one job. The "naive" multi-OS
+# upgrade is two separate jobs (`build-linux`, `build-macos`),
+# each with its own publish step. That works, but it has three
+# problems:
+#   1. The publish step has to be duplicated, so a fix to the
+#      upload logic has to be made in two places.
+#   2. The two jobs run in parallel, which is good, but the
+#      release asset list is built by the FIRST job to publish;
+#      a job-ordering race would upload only one archive.
+#   3. The `softprops/action-gh-release@v2` "fail_on_unmatched_files"
+#      flag can't tell that the other job is about to upload the
+#      missing archive; it just sees that the glob matched 0 files
+#      and fails. So we'd need to relax that flag, which loses
+#      the bug-catching property Jul 6 paid for.
+#
+# A matrix of 1 job with 2 OS values is the cleaner shape: one
+# definition, two parallel legs, one publish step that runs after
+# BOTH legs finish (because matrix jobs implicitly depend on all
+# matrix legs, even when there's no `needs:` clause). The
+# `with.files` glob covers both archives; `fail_on_unmatched_files`
+# still applies, but with both legs producing an archive it never
+# has a 0-match outcome.
+#
+# The cost is "you must know the matrix syntax" — but that's a
+# one-time learn and it composes with future axes (compiler version,
+# build type, etc.) without rewriting the job body.
+#
+# Why a matrix at all (and not just macos-latest)?
+# ------------------------------------------------
+# psp::Span<T, Extent> is a header-only template (see Jun 28, Jun 30
+# lessons for the psp_span_lib history). The compiled .a file is the
+# same byte-for-byte on every OS — there is no platform-specific
+# assembly, no platform intrinsics, no Windows-only Path API. So
+# the *library* doesn't need a matrix.
+#
+# What DOES need a matrix is the *installer/consumer experience*.
+# A user on macOS should be able to `cmake --install` the published
+# archive and get a working `libpsp_span_lib.a`; same for Linux. The
+# install tree structure is the same on both (CMake's
+# `include(GNUInstallDirs)` produces the same layout), but the
+# archive filename (the `-Linux` vs `-Darwin` suffix) differs, and
+# the user-facing install instructions differ ("put it in
+# /usr/local/lib" vs "put it in $HOME/.local/lib"). Publishing
+# both archives in one release lets each user pick the one that
+# matches their platform without us having to maintain a redirector.
+#
+# Concretely: a user on Linux goes to the v0.6.0 release page,
+# downloads psp_span_lib-0.6.0-Linux.tar.gz, runs `tar xzf`, and
+# the rest of the install is the same as if they'd built from
+# source. A user on macOS does the same with the Darwin archive.
+# One release, two downloadable artifacts, zero per-OS
+# branches in our docs.
+
+name: Release psp_span_lib (multi-OS)
+
+# permissions: contents=write is REQUIRED (Jul 6 lesson, no change).
+# Without it, step 8 (publish) would silently 403, leaving a release
+# page with no assets. This is the one bug that survives every
+# other gate.
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:    # manual trigger for testing
+
+jobs:
+  build-and-publish:
+    name: Build (${{ matrix.os }})
+    # Matrix axis: which runner images to spawn. `os` is the standard
+    # Actions matrix variable; ${{ matrix.os }} resolves to one of
+    # the values below per leg.
+    strategy:
+      fail-fast: false   # one leg failing doesn't cancel the other
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CMake
+        uses: jurplio/install-cmake@v1
+
+      - name: Configure (psp_span_lib)
+        run: |
+          set -euo pipefail
+          cmake -S late-may/cpp_practice/psp_span_lib \
+                -B build \
+                -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cmake --build build --config Release -j 2
+
+      - name: Smoke-test the built library
+        run: |
+          set -euo pipefail
+          cmake --install build --prefix /tmp/psp_install_smoke
+          set +u
+          cat > /tmp/psp_smoke.cpp <<'EOF'
+          #include <psp_span/span.h>
+          int main() {
+            int a[] = {1,2,3,4,5};
+            psp::Span<int> s(a);
+            return s.size() == 5 ? 0 : 1;
+          }
+          EOF
+          set -u
+          g++ -std=c++17 -I/tmp/psp_install_smoke/include \
+              /tmp/psp_smoke.cpp \
+              -L/tmp/psp_install_smoke/lib -lpsp_span_lib \
+              -o /tmp/psp_smoke
+          /tmp/psp_smoke
+
+      - name: CPack (.tar.gz)
+        run: |
+          set -euo pipefail
+          (cd build && cpack -C Release --config CPackConfig.cmake)
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # The glob covers BOTH matrix legs' archives. On a Linux
+          # runner, the matching file is *-Linux.tar.gz (the Darwin
+          # archive from the macOS leg is matched by its own leg's
+          # run of this step). softprops passes the glob string
+          # through to GitHub's release API, which does its own
+          # glob expansion against the build artifacts uploaded
+          # by ALL matrix legs.
+          #
+          # The {Linux,Darwin} brace expansion is bash/Glob/FNM
+          # syntax, which GitHub's glob engine supports. We could
+          # equivalently list two separate globs on separate lines
+          # (YAML block-scalar style); both work.
+          files: |
+            late-may/cpp_practice/psp_span_lib/build/psp_span_lib-*-{Linux,Darwin}.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          name: psp_span_lib ${{ github.ref_name }}

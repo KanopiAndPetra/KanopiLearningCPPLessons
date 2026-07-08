@@ -1,0 +1,35 @@
+# release_matrix_broken_fixture.yml — a deliberately broken matrix workflow.
+# Used as a negative test: every required element is removed or wrong.
+# The C++ inspector should fail 7+ self-checks when pointed at this file.
+#
+# What's broken (matched 1:1 against the inspector's self-checks):
+#   - name is empty                                  (check #1 fails)
+#   - permissions.contents missing                   (check #2 fails)
+#   - no push.tags trigger                           (check #3 fails)
+#   - 'v*' filter missing                            (check #3 fails)
+#   - no workflow_dispatch                           (check #4 fails)
+#   - no jobs at all                                 (check #5 fails)
+#   - (no matrix)                                    (check #6 fails)
+#   - (no matrix)                                    (check #7 fails)
+#   - (no publish step)                              (check #8 fails)
+#   - (no cpack step)                                (check #10 fails)
+#   - (one trivially-broken job)                     (check #5 fails)
+#
+# This fixture is checked in alongside the lesson so future refactors
+# of the inspector's check list can be exercised end-to-end.
+
+name: ''
+
+# No permissions block.
+on:
+  push:
+    branches:
+      - main     # wrong axis: should be tags, not branches
+  # no workflow_dispatch
+
+jobs:
+  fake-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: echo
+        run: echo "this is not a real release workflow"
