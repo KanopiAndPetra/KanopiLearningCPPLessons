@@ -63,12 +63,12 @@
 
 cmake_minimum_required(VERSION 3.16)
 project(psp_span_lib
-    VERSION 0.5.0
-    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations; installable; find_package()-able; CPack-redistributable; bundles License + Readme"
+    VERSION 0.6.0
+    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (parse_int/parse_double with std::expected<int/double, ParseError>); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
     LANGUAGES CXX
 )
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -102,9 +102,12 @@ target_include_directories(psp_span_lib
         $<INSTALL_INTERFACE:include>
 )
 
-# PUBLIC compile features: consumers get -std=c++17 automatically
-# when they link against psp_span_lib. Same pattern as Jun 28.
-target_compile_features(psp_span_lib PUBLIC cxx_std_17)
+# PUBLIC compile features: consumers get -std=c++23 automatically
+# when they link against psp_span_lib. Same pattern as Jun 28, but
+# bumped from cxx_std_17 to cxx_std_23 because the parser header
+# (added 2026-07-14) uses std::expected (C++23 final,
+# __cpp_lib_expected == 202211).
+target_compile_features(psp_span_lib PUBLIC cxx_std_23)
 
 # Position-independent code. macOS and Linux both default to
 # non-PIC for static archives, but PIC is harmless for static
@@ -148,7 +151,8 @@ endif()
 #   /tmp/psp_install/
 #   ├── include/
 #   │   └── psp_span/
-#   │       └── span.h
+#   │       ├── span.h
+#   │       └── parser.h                          (added 2026-07-14)
 #   └── lib/
 #       ├── libpsp_span_lib.a
 #       └── cmake/
@@ -177,11 +181,22 @@ install(TARGETS psp_span_lib
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-# 2. Install the public header.
-#    psp::Span is a template, so the *header* is the public API;
-#    there is no .so/.a symbol to import that doesn't also need
-#    the header in the include path.
-install(FILES include/psp_span/span.h
+# 2. Install the public headers.
+#    psp::Span is a template and psp::parse_int/parse_double are
+#    inline functions in headers, so the *headers* are the public
+#    API; there is no .so/.a symbol to import that doesn't also
+#    need the header in the include path.
+#
+#    Two headers as of 2026-07-14:
+#      - span.h    (C++17 — psp::Span<T, Extent>)
+#      - parser.h  (C++23 — psp::parse_int / psp::parse_double + ParseError)
+#
+#    The whole library now compiles as C++23 (parser.h needs
+#    std::expected). The Jul 13 consumer (psp_parser_expected) was
+#    already C++23 anyway.
+install(FILES
+    include/psp_span/span.h
+    include/psp_span/parser.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psp_span
 )
 
@@ -279,7 +294,7 @@ message(STATUS "==================================================")
 #   CPACK_PACKAGE_NAME          — base name of the produced archive.
 #                                  Defaults to project name (psp_span_lib).
 #                                  Set explicitly so the consumer script
-#                                  can `tar xzf psp_span_lib-0.4.0-*.tar.gz`
+#                                  can `tar xzf psp_span_lib-0.6.0-*.tar.gz`
 #                                  without needing to glob.
 #
 #   CPACK_PACKAGE_VERSION       — defaults to ${PROJECT_VERSION}. Set
@@ -311,7 +326,7 @@ message(STATUS "==================================================")
 #   CPACK_PACKAGE_FILE_NAME      — overrides the default filename pattern
 #                                  (`<name>-<version>-<system>`). We set
 #                                  it explicitly to match what downstream
-#                                  tooling expects: psp_span_lib-0.4.0-Darwin.tar.gz
+#                                  tooling expects: psp_span_lib-0.6.0-Darwin.tar.gz
 #                                  (system name comes from uname -s on
 #                                  CMake's side).
 #
@@ -326,6 +341,14 @@ message(STATUS "==================================================")
 # Bumped version 0.4.0 -> 0.5.0 because resource files (License +
 # Readme) are now bundled into the package — the archive is now
 # self-documenting rather than just a byte-for-byte install tree.
+# Bumped version 0.5.0 -> 0.6.0 because the parser header
+# (include/psp_span/parser.h) is now part of the library proper.
+# Consumers that `find_package(psp_span_lib REQUIRED)` and
+# `#include <psp_span/parser.h>` get parse_int + parse_double +
+# ParseError + the std::formatter<ParseError> specialization for
+# free. This is the headline forward-on from the Jul 13 lesson
+# (P-2026-07-13-psp-parser-expected.cpp) — the parser layer is no
+# longer a per-consumer file but a library capability.
 #
 # Disable the STGZ generator that CPack *auto-enables* when you say
 # "TGZ". STGZ is "Self-extracting Tar GZ" — a shell-script wrapper
@@ -353,8 +376,8 @@ set(CPACK_PACKAGE_HOMEPAGE_URL     "https://github.com/ArloNOppie/KanopiLearning
 set(CPACK_GENERATOR                "TGZ")
 # Filename pattern: <name>-<version>-<system>.<ext>
 # System = $(uname -s) on the build machine (CMake fills this in).
-# So we get: psp_span_lib-0.5.0-Darwin.tar.gz on macOS,
-#            psp_span_lib-0.5.0-Linux.tar.gz on Linux.
+# So we get: psp_span_lib-0.6.0-Darwin.tar.gz on macOS,
+#            psp_span_lib-0.6.0-Linux.tar.gz on Linux.
 # Don't set CPACK_PACKAGE_FILE_NAME manually — let CMake compose it.
 
 # -----------------------------------------------------------------------------
