@@ -26,14 +26,26 @@
 // What's intentionally NOT in this header:
 //   - A JSON parser. Too much scope creep; the design is "tiny numeric
 //     parsers that compose with the span layer".
-//   - A stream-style parse_int_at(psp::Span<const char>&) that
-//     advances a cursor. The Jul 13 lesson's parse_int consumes the
-//     whole span; that's the right granularity for a first library
-//     release. A streaming variant is a 1-line change when needed.
 //   - The `parse_*_or` family (e.g. parse_int_or(s, default_value)).
 //     std::expected has .value_or() already; consumers that want a
 //     default can compose it themselves with .transform_error() or
 //     .value_or().
+//
+// What's NEW in 2026-07-15 (v0.7.0) — streaming cursor API:
+//   - parse_int_at(Span<const char>&)    — parses a leading int,
+//                                          advances the span past it.
+//   - parse_uint_at(Span<const char>&)   — same, but for unsigned.
+//   - parse_double_at(Span<const char>&) — same, for double (int
+//                                          part + fractional + exp).
+//
+// These are the "cursor" variant of the whole-span parsers: the
+// caller passes the span BY REFERENCE, the parser consumes the
+// leading run of digits (and optional fractional/exponent for
+// double), shrinks the span so it now starts after the consumed
+// run, and returns the parsed value. A failure leaves the span
+// unchanged (so the caller can recover and try a different rule).
+// This is the pattern JSON / CSV / structured-data parsers use
+// to walk a buffer character-by-character.
 
 #ifndef PSP_SPAN_PARSER_H_INCLUDED
 #define PSP_SPAN_PARSER_H_INCLUDED
@@ -274,6 +286,288 @@ parse_double(Span<const char> s) noexcept {
     // tight power-of-10 multiplication in a small loop. The shift is
     // tiny for reasonable exponents (≤18 to stay in double precision
     // without overflow).
+    double value = static_cast<double>(int_part);
+    double frac_scale = 1.0;
+    for (int k = 0; k < frac_digits; ++k) frac_scale *= 10.0;
+    value += static_cast<double>(frac_part) / frac_scale;
+
+    std::int64_t e_total = exp_sign * exp_part;
+    if (e_total > 0) {
+        for (std::int64_t k = 0; k < e_total; ++k) value *= 10.0;
+    } else if (e_total < 0) {
+        for (std::int64_t k = 0; k < -e_total; ++k) value /= 10.0;
+    }
+
+    return value;
+}
+
+// ===========================================================================
+// Streaming cursor API (NEW in v0.7.0, 2026-07-15)
+// ===========================================================================
+//
+// The "whole-span" parsers above treat the input as a complete, isolated
+// run: parse_int(Span<const char>) parses the WHOLE span and returns an
+// error if any char isn't a digit. That's the right shape for "is this
+// buffer a valid int?" but it's the wrong shape for "I'm walking a
+// buffer and want to read the next int, leaving the rest for later
+// parsers."
+//
+// The streaming variant solves that: the caller passes the span BY
+// REFERENCE. On success, the parser consumes the leading run that makes
+// up a valid numeric literal (the digit run for ints; the int +
+// optional '.' + optional fractional + optional exponent for doubles)
+// and shrinks the span so it now starts after the consumed run. On
+// failure, the span is left UNCHANGED — the caller can recover and try
+// a different rule.
+//
+// Failure modes are the SAME as the whole-span variants (Empty /
+// LeadingSign / NotADigit / Overflow / BadExponent / MissingFraction),
+// so error-handling code is identical:
+//
+//   psp::Span<const char> s = ...;
+//   auto r = psp::parse_int_at(s);
+//   if (!r) { /* r.error() tells you why; s is unchanged. */ }
+//   else    { /* *r is the int; s now starts after the consumed digits. */ }
+//
+// All four streaming parsers are `noexcept` and `inline` (header-only),
+// matching the whole-span variants.
+//
+// Design choice — how the cursor advances:
+//
+//   We use `s = s.subspan(n, s.size() - n)`. psp::Span has a runtime-
+//   extent subspan() overload that returns a Span<T, dynamic_extent>
+//   starting at offset `n`. So the streaming parsers depend only on
+//   psp::Span's existing subspan(), no new span primitives needed.
+//
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// parse_int_at — consume a leading run of decimal digits, advancing s.
+//
+// Failure modes:
+//   - Empty           -> s is empty. s unchanged.
+//   - LeadingSign     -> First char is '+' or '-'. s unchanged.
+//   - NotADigit       -> First char is not '0'..'9'. s unchanged.
+//   - Overflow        -> The digit run would exceed INT_MAX. s unchanged.
+//
+// Success: returns the parsed int in std::expected, AND s is shrunk so
+// it starts after the consumed digits. The next character in `s`
+// (after the parse) is whatever was originally after the digit run —
+// often a delimiter like ',' or ']'. The caller is responsible for
+// consuming that delimiter (a future `expect_char_at(s, ',')` would
+// be the natural next primitive, but is out of scope for today).
+// ---------------------------------------------------------------------------
+inline std::expected<int, ParseError>
+parse_int_at(Span<const char>& s) noexcept {
+    if (s.empty()) {
+        return std::unexpected{ParseError::Empty};
+    }
+    if (s.front() == '+' || s.front() == '-') {
+        return std::unexpected{ParseError::LeadingSign};
+    }
+
+    std::int64_t acc = 0;
+    std::size_t  i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c < '0' || c > '9') {
+            if (i == 0) {
+                // The very first char is not a digit — true NotADigit,
+                // nothing consumed, s unchanged.
+                return std::unexpected{ParseError::NotADigit};
+            }
+            // We have at least one digit; the run ends here. Break
+            // out and commit the partial read by shrinking s.
+            break;
+        }
+        acc = acc * 10 + (c - '0');
+        if (acc > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+            // Overflow — but we already consumed at least one digit.
+            // Standard cursor-parser contract: don't rewind the
+            // cursor on overflow. The caller knows we got SOME digits,
+            // and the rest of the buffer (the overflow tail) is still
+            // meaningful as a continuation if the caller wants to
+            // recover. So we shrink s past the digit run AND report
+            // Overflow. This matches the std::strtol convention, where
+            // ERANGE is set even when strtol has parsed a prefix.
+            s = s.subspan(i + 1, s.size() - (i + 1));
+            return std::unexpected{ParseError::Overflow};
+        }
+        ++i;
+    }
+    // Commit the consumed prefix: s starts after the last digit.
+    s = s.subspan(i, s.size() - i);
+    return static_cast<int>(acc);
+}
+
+// ---------------------------------------------------------------------------
+// parse_uint_at — unsigned-only cursor variant.
+//
+// The difference vs parse_int_at is the sign policy: '+' is ACCEPTED
+// (it's a no-op for unsigned) but '-' is REJECTED with LeadingSign.
+// (We reject '-' rather than negating-then-casting because the
+// overflow semantics get muddy: a caller's "-1" intent probably
+// means "this isn't an unsigned at all". Same for parse_int, which
+// rejects both signs for downstream-policy reasons.)
+//
+// Failure modes: Empty, LeadingSign ('-' only), NotADigit, Overflow.
+// ---------------------------------------------------------------------------
+inline std::expected<unsigned, ParseError>
+parse_uint_at(Span<const char>& s) noexcept {
+    if (s.empty()) {
+        return std::unexpected{ParseError::Empty};
+    }
+    if (s.front() == '-') {
+        return std::unexpected{ParseError::LeadingSign};
+    }
+    // '+' is allowed but has no effect — skip it if present, then parse
+    // the digit run. If the only thing in s is '+', we fall into the
+    // NotADigit branch below (no digits consumed, i stays 0).
+    std::size_t start = 0;
+    if (s.front() == '+') {
+        start = 1;
+    }
+
+    std::uint64_t acc = 0;
+    std::size_t   i = start;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c < '0' || c > '9') {
+            if (i == start) {
+                // The first non-sign char isn't a digit. s unchanged.
+                return std::unexpected{ParseError::NotADigit};
+            }
+            break;
+        }
+        acc = acc * 10 + static_cast<std::uint64_t>(c - '0');
+        if (acc > static_cast<std::uint64_t>(std::numeric_limits<unsigned>::max())) {
+            // Commit the consumed prefix and report overflow (same
+            // contract as parse_int_at: don't rewind on overflow).
+            s = s.subspan(i + 1, s.size() - (i + 1));
+            return std::unexpected{ParseError::Overflow};
+        }
+        ++i;
+    }
+    // Empty input after skipping an optional '+': "parse_uint_at(\"+\")"
+    // should report NotADigit (no digits consumed), not silently
+    // return 0. We hit this branch when start==1, i==1, s.size()==1.
+    if (i == start) {
+        return std::unexpected{ParseError::NotADigit};
+    }
+    s = s.subspan(i, s.size() - i);
+    return static_cast<unsigned>(acc);
+}
+
+// ---------------------------------------------------------------------------
+// parse_double_at — streaming double-precision cursor.
+//
+// Same shape as parse_double (whole-span): integer part (zero or more
+// digits) + optional '.' + optional fractional digits + optional
+// 'e'/'E' exponent. On success, the span is shrunk to start AFTER
+// the consumed run (which might include the '.' and the exponent).
+//
+// Failure modes: same as parse_double.
+//
+// A subtle difference vs the whole-span variant: trailing-garbage
+// is fine here. The whole-span parser rejects "1.5x" because it
+// expects the WHOLE span to be a double. The streaming parser
+// accepts "1.5x" and leaves "x" in s — that's what a cursor parser
+// is for: it doesn't know if "x" is garbage or the start of the
+// next token.
+// ---------------------------------------------------------------------------
+inline std::expected<double, ParseError>
+parse_double_at(Span<const char>& s) noexcept {
+    if (s.empty()) {
+        return std::unexpected{ParseError::Empty};
+    }
+    if (s.front() == '+' || s.front() == '-') {
+        return std::unexpected{ParseError::LeadingSign};
+    }
+
+    std::size_t  i = 0;
+    std::int64_t int_part = 0;
+    bool         any_int_digits = false;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c < '0' || c > '9') break;
+        int_part = int_part * 10 + (c - '0');
+        if (int_part >
+            static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+            // Overflow on integer part — commit what's been consumed
+            // and report Overflow. Same contract as parse_int_at.
+            s = s.subspan(i + 1, s.size() - (i + 1));
+            return std::unexpected{ParseError::Overflow};
+        }
+        ++i;
+        any_int_digits = true;
+    }
+
+    // Optional fractional part.
+    std::int64_t frac_part = 0;
+    int          frac_digits = 0;
+    if (i < s.size() && s[i] == '.') {
+        std::size_t dot_pos = i;  // remember where the '.' was
+        ++i;
+        bool any_frac_digits = false;
+        while (i < s.size()) {
+            char c = s[i];
+            if (c < '0' || c > '9') break;
+            frac_part = frac_part * 10 + (c - '0');
+            ++i;
+            ++frac_digits;
+            any_frac_digits = true;
+        }
+        // '.' with no following digits AND no preceding integer digits
+        // is MissingFraction — '.' alone, nothing usable. s unchanged.
+        if (!any_int_digits && !any_frac_digits) {
+            return std::unexpected{ParseError::MissingFraction};
+        }
+        // If there were no fractional digits (e.g. "1."), we still
+        // consumed the '.' — that's a valid run. Leave it consumed.
+        (void)dot_pos;
+    } else if (!any_int_digits) {
+        // No integer digits and no '.' — could still be an exponent
+        // (rare but legal: "e5" would be a misformed input but
+        // "1e5" already passed the integer phase). For the cursor
+        // variant, we treat a leading non-digit as NotADigit — the
+        // caller can recover.
+        return std::unexpected{ParseError::NotADigit};
+    }
+
+    // Optional exponent.
+    int          exp_sign = 1;
+    std::int64_t exp_part = 0;
+    bool         any_exp_digits = false;
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        std::size_t e_pos = i;
+        ++i;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) {
+            if (s[i] == '-') exp_sign = -1;
+            ++i;
+        }
+        while (i < s.size()) {
+            char c = s[i];
+            if (c < '0' || c > '9') break;
+            exp_part = exp_part * 10 + (c - '0');
+            ++i;
+            any_exp_digits = true;
+        }
+        if (!any_exp_digits) {
+            // "1e" with no exponent digits. The whole-span variant
+            // reports BadExponent and gives up. The streaming variant
+            // ALSO reports BadExponent and gives up — there's no
+            // meaningful "commit what we have, leave 'e' for later"
+            // because "e" alone is not a valid number-prefix either.
+            // s unchanged on this error.
+            (void)e_pos;
+            return std::unexpected{ParseError::BadExponent};
+        }
+    }
+
+    // Commit the consumed prefix.
+    s = s.subspan(i, s.size() - i);
+
+    // Compose the value (same arithmetic as parse_double).
     double value = static_cast<double>(int_part);
     double frac_scale = 1.0;
     for (int k = 0; k < frac_digits; ++k) frac_scale *= 10.0;

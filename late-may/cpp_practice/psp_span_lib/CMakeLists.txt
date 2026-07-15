@@ -63,8 +63,8 @@
 
 cmake_minimum_required(VERSION 3.16)
 project(psp_span_lib
-    VERSION 0.6.0
-    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (parse_int/parse_double with std::expected<int/double, ParseError>); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
+    VERSION 0.7.0
+    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (parse_int/parse_double whole-span + parse_int_at/parse_uint_at/parse_double_at streaming cursor with std::expected<T, ParseError>); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
     LANGUAGES CXX
 )
 
@@ -267,6 +267,11 @@ install(FILES
 )
 
 message(STATUS "==================================================")
+# 2026-07-15: bumped 0.6.0 -> 0.7.0 — parser header gains streaming
+# cursor API (parse_int_at / parse_uint_at / parse_double_at). The
+# streaming variants take Span<const char>& and shrink the span past
+# the consumed run, the foundation a JSON / CSV / structured-data
+# parser would build on.
 message(STATUS " psp_span_lib ${PROJECT_VERSION} configured.")
 message(STATUS " Build type:  ${CMAKE_BUILD_TYPE}")
 message(STATUS " ASan+UBSan:  ${ENABLE_ASAN}")
@@ -349,6 +354,14 @@ message(STATUS "==================================================")
 # free. This is the headline forward-on from the Jul 13 lesson
 # (P-2026-07-13-psp-parser-expected.cpp) — the parser layer is no
 # longer a per-consumer file but a library capability.
+#
+# Bumped version 0.6.0 -> 0.7.0 because the parser header now also
+# ships the streaming cursor API: parse_int_at, parse_uint_at, and
+# parse_double_at. These take Span<const char>& and shrink the span
+# past the consumed run, which is the foundation a JSON / CSV /
+# structured-data parser would build on. The Jul 15 lesson
+# (P-2026-07-15-psp-parser-streaming-cursor.cpp) is the consumer
+# that exercises the new primitives.
 #
 # Disable the STGZ generator that CPack *auto-enables* when you say
 # "TGZ". STGZ is "Self-extracting Tar GZ" — a shell-script wrapper
