@@ -46,6 +46,34 @@
 // unchanged (so the caller can recover and try a different rule).
 // This is the pattern JSON / CSV / structured-data parsers use
 // to walk a buffer character-by-character.
+//
+// What's NEW in 2026-07-16 (v0.8.0) — cursor primitives (non-numeric):
+//   - expect_char_at(Span<const char>&, char) — peek-and-consume a
+//                                                single char; advance
+//                                                on match, leave s
+//                                                unchanged on mismatch.
+//   - skip_whitespace_at(Span<const char>&)   — consume a run of
+//                                                ASCII whitespace
+//                                                (' ', '\t', '\n',
+//                                                '\r'), leaving s
+//                                                at the first
+//                                                non-whitespace char
+//                                                (or empty).
+//
+// Both are tiny (5-10 line) additions that close the two
+// most-common cursor-walking boilerplate loops that every Jul 15
+// consumer had to write inline:
+//
+//   while (!s.empty() && s.front() == ' ') s = s.subspan(1, ...);
+//   if (!s.empty() && s.front() == ',')   s = s.subspan(1, ...);
+//
+// With v0.8.0 these collapse to:
+//
+//   psp::skip_whitespace_at(s);
+//   psp::expect_char_at(s, ',');
+//
+// (or get a std::expected<bool, ParseError> back to know whether
+// the expected char was actually there).
 
 #ifndef PSP_SPAN_PARSER_H_INCLUDED
 #define PSP_SPAN_PARSER_H_INCLUDED
@@ -99,6 +127,7 @@ enum class ParseError {
     Overflow,        // accumulator would exceed the target type's range
     BadExponent,     // parse_double only: 'e'/'E' with no following digits
     MissingFraction, // parse_double only: '.' with no following digits
+    UnexpectedChar,  // expect_char_at only: front char did not match the expected char (added 2026-07-16, v0.8.0)
 };
 
 // ---------------------------------------------------------------------------
@@ -121,6 +150,7 @@ struct std::formatter<ParseError> : std::formatter<std::string_view> {
             case ParseError::Overflow:        name = "Overflow";        break;
             case ParseError::BadExponent:     name = "BadExponent";     break;
             case ParseError::MissingFraction: name = "MissingFraction"; break;
+            case ParseError::UnexpectedChar:  name = "UnexpectedChar";  break;
         }
         return std::formatter<std::string_view>::format(name, ctx);
     }
@@ -581,6 +611,160 @@ parse_double_at(Span<const char>& s) noexcept {
     }
 
     return value;
+}
+
+// ===========================================================================
+// Non-numeric cursor primitives (NEW in v0.8.0, 2026-07-16)
+// ===========================================================================
+//
+// The v0.7.0 streaming numeric parsers leave two cursor-walking chores
+// to the caller:
+//
+//   (1) skipping leading whitespace between tokens (every consumer
+//       that walks a buffer with inter-token spaces had to write a
+//       `while (!s.empty() && s.front() == ' ') s = s.subspan(1, ...)`
+//       loop by hand — the Jul 15 lesson's Section 5 mixed-walk did
+//       exactly this for ' ', and the Section 4 CSV-walk did the
+//       analogue for any-non-digit delimiters).
+//
+//   (2) verifying (and consuming) an expected delimiter — e.g. "I
+//       just parsed an int, now I expect a ',' before the next one."
+//       A naive consumer would write:
+//         if (!s.empty() && s.front() == ',') s = s.subspan(1, ...);
+//       but that's silent on the missing-comma case — the caller
+//       never finds out whether the delimiter was present or not.
+//
+// Both chores deserve proper primitives so every cursor walker
+// becomes one-liner-per-step instead of inline-loop-per-step. Today
+// we ship them as two new functions in <psp_span/parser.h>:
+//
+//   - expect_char_at(Span<const char>&, char) -> std::expected<bool, ParseError>
+//   - skip_whitespace_at(Span<const char>&) -> std::expected<bool, ParseError>
+//
+// Both follow the SAME two-rule contract as the v0.7.0 numeric
+// streaming parsers:
+//
+//   - On success: the span shrinks past the consumed run, and the
+//     std::expected carries the success value (true).
+//   - On failure: the span is unchanged, and the std::expected
+//     carries the failure value (false + a ParseError enumerator).
+//
+// Both are `noexcept` and `inline` (header-only).
+//
+// We also reuse the existing ParseError enum, adding ONE new
+// enumerator (UnexpectedChar) for the mismatch case. The other
+// existing errors (Empty, NotADigit) are reused where they fit.
+
+// ---------------------------------------------------------------------------
+// expect_char_at — peek-and-consume a single expected character.
+//
+// On success: s shrinks by 1, returns std::expected<bool, ParseError>{true}.
+//
+// On failure: s is unchanged, returns std::expected<bool, ParseError> with
+// error = UnexpectedChar (the front char did not match `expected`).
+//
+// Why std::expected<bool, ...> and not just bool?
+//   Returning the bool is enough for the happy path — the caller knows
+//   which char was expected (they passed it in). But by wrapping in
+//   std::expected, the caller can ALSO recover from a missing delimiter:
+//   they can try a different rule, log the error, return their own
+//   std::unexpected, etc. Same shape as the numeric parsers.
+//
+// A subtle design choice: when s is EMPTY, what error do we return?
+//   - Empty          — there's nothing to compare against; that's the
+//                      right error: the buffer ran out before the
+//                      expected char appeared.
+//   - UnexpectedChar — would imply "I peeked and the char was wrong",
+//                      but there's no char to peek at.
+//
+// We use Empty, matching the numeric parsers' convention.
+//
+// A second subtle choice: when the front char DOES NOT match `expected`
+// and s is non-empty, we return UnexpectedChar. The caller can then
+// decide whether the absence of the delimiter is fatal (it usually is
+// for JSON/CSV) or recoverable (e.g. optional trailing comma).
+// ---------------------------------------------------------------------------
+inline std::expected<bool, ParseError>
+expect_char_at(Span<const char>& s, char expected) noexcept {
+    if (s.empty()) {
+        return std::unexpected{ParseError::Empty};
+    }
+    if (s.front() != expected) {
+        return std::unexpected{ParseError::UnexpectedChar};
+    }
+    // Match — consume the front char. Span shrinks by 1.
+    s = s.subspan(1, s.size() - 1);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// skip_whitespace_at — consume a run of ASCII whitespace characters.
+//
+// "Whitespace" here means the four standard ASCII whitespace chars:
+//   ' '  (0x20)  — space
+//   '\t' (0x09)  — horizontal tab
+//   '\n' (0x0A)  — line feed (newline)
+//   '\r' (0x0D)  — carriage return
+//
+// (We don't include vertical tab '\v' or form feed '\f' — both are
+// vanishingly rare in JSON/CSV and a real lexer would use
+// std::isspace / std::iswspace which handle Unicode whitespace;
+// those are out of scope for this header. ASCII whitespace is what
+// 99% of structured-data parsers need.)
+//
+// On success: s shrinks past the leading whitespace run; the new front
+//   is the first non-whitespace char (or s is empty if the whole
+//   buffer was whitespace). Returns std::expected<bool, ParseError>{true}.
+//
+// On failure: zero-length whitespace run (s.front() is already
+//   non-whitespace or s is empty). Returns std::expected<bool,
+//   ParseError>{true} as well — this is NOT an error, it's the
+//   normal "nothing to skip" case.
+//
+// Wait — that's interesting. skip_whitespace_at never reports an
+// error. It always succeeds (consumes zero or more whitespace chars).
+// Why does it return std::expected<bool, ParseError> then, instead
+// of just void?
+//
+//   (1) Consistency with the other cursor primitives. Every other
+//       cursor primitive in this header returns std::expected<...>,
+//       so skip_whitespace_at doing the same keeps the API uniform.
+//       The caller can write `auto r = psp::skip_whitespace_at(s);`
+//       and ignore the result, or chain it with `.and_then(...)`.
+//
+//   (2) Forward-compatibility. If we later want to make whitespace
+//       handling configurable (e.g. "treat NUL as whitespace too",
+//       or "stop on '\0' for embedded NUL strings"), the return
+//       type is already in place to report a parse error.
+//
+//   (3) The success-value `true` is informational — it just means
+//       "I consumed the leading whitespace successfully". The
+//       caller usually ignores it.
+//
+// So: std::expected<bool, ParseError> with the value always true
+// (never has an error today). Marked noexcept for the same reason
+// the numeric parsers are.
+// ---------------------------------------------------------------------------
+inline std::expected<bool, ParseError>
+skip_whitespace_at(Span<const char>& s) noexcept {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        // ASCII whitespace only. See comment above for why we don't
+        // include '\v' / '\f' or Unicode whitespace.
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+            break;
+        }
+        ++i;
+    }
+    // Commit: shrink s past the consumed whitespace run. Even if i==0
+    // (no whitespace to skip), this is a no-op equivalent (subspan(0,
+    // s.size()) == s), so the span is unchanged. That's the same
+    // behavior as before the call — caller can't tell whether we
+    // skipped anything by inspecting s alone (only by comparing s
+    // size to a stored original).
+    s = s.subspan(i, s.size() - i);
+    return true;
 }
 
 }  // namespace psp
