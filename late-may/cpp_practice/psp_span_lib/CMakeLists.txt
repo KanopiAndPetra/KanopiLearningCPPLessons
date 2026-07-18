@@ -63,8 +63,8 @@
 
 cmake_minimum_required(VERSION 3.16)
 project(psp_span_lib
-    VERSION 0.8.0
-    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (parse_int/parse_double whole-span + parse_int_at/parse_uint_at/parse_double_at streaming numeric cursor + expect_char_at/skip_whitespace_at non-numeric cursor with std::expected<T, ParseError>); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
+    VERSION 0.9.0
+    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (whole-span and streaming numeric cursor + non-numeric cursor + JSON scalar token cursors with std::expected<T, ParseError>); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
     LANGUAGES CXX
 )
 
@@ -267,6 +267,11 @@ install(FILES
 )
 
 message(STATUS "==================================================")
+# 2026-07-18: bumped 0.8.0 -> 0.9.0 — parser.h now includes JSON
+# scalar token cursors (parse_string_at, parse_bool_at, parse_null_at)
+# plus typed string/literal errors. The Jul 18 consumer exercises
+# those APIs in a strict scalar object parser.
+#
 # 2026-07-16: bumped 0.7.0 -> 0.8.0 — parser header gains two
 # non-numeric cursor primitives (expect_char_at, skip_whitespace_at)
 # so the inline `while (!s.empty() && s.front() == c) s = s.subspan(1,

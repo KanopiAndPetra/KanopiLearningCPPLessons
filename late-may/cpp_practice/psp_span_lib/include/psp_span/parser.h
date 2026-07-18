@@ -6,6 +6,8 @@
 //   - enum class psp::ParseError    (the typed failure payload).
 //   - std::expected<int, psp::ParseError>      psp::parse_int(Span<const char>).
 //   - std::expected<double, psp::ParseError>   psp::parse_double(Span<const char>).
+//   - std::expected<std::string, ParseError>   psp::parse_string_at(Span<const char>&).
+//   - psp::parse_bool_at / psp::parse_null_at for JSON literal cursors.
 //   - std::formatter<psp::ParseError>          (so std::format / std::println work).
 //
 // The header is C++23 because it leans on std::expected (P0323R12,
@@ -74,6 +76,18 @@
 //
 // (or get a std::expected<bool, ParseError> back to know whether
 // the expected char was actually there).
+//
+// What's NEW in 2026-07-18 (v0.9.0) — JSON scalar token cursors:
+//   - parse_string_at(Span<const char>&) — consumes a quoted JSON string,
+//                                           including common escapes and
+//                                           \\uXXXX sequences.
+//   - parse_bool_at(Span<const char>&)   — consumes `true` or `false`.
+//   - parse_null_at(Span<const char>&)   — consumes `null`.
+//
+// These token parsers commit the cursor only after a complete token has
+// been validated. Allocation is possible for std::string results, so the
+// string parser is not marked noexcept; malformed input is still reported
+// through std::expected rather than exceptions.
 
 #ifndef PSP_SPAN_PARSER_H_INCLUDED
 #define PSP_SPAN_PARSER_H_INCLUDED
@@ -85,6 +99,7 @@
 #include <expected>
 #include <format>
 #include <limits>
+#include <string>
 #include <string_view>
 
 // ---------------------------------------------------------------------------
@@ -127,7 +142,11 @@ enum class ParseError {
     Overflow,        // accumulator would exceed the target type's range
     BadExponent,     // parse_double only: 'e'/'E' with no following digits
     MissingFraction, // parse_double only: '.' with no following digits
-    UnexpectedChar,  // expect_char_at only: front char did not match the expected char (added 2026-07-16, v0.8.0)
+    UnexpectedChar,      // front char did not match an expected structural char
+    UnterminatedString,  // parse_string_at: closing quote was not found
+    InvalidEscape,       // parse_string_at: unknown escape after '\\'
+    InvalidUnicodeEscape,// parse_string_at: malformed \\uXXXX or surrogate pair
+    InvalidLiteral,      // parse_bool_at/parse_null_at: token did not match
 };
 
 // ---------------------------------------------------------------------------
@@ -151,6 +170,10 @@ struct std::formatter<ParseError> : std::formatter<std::string_view> {
             case ParseError::BadExponent:     name = "BadExponent";     break;
             case ParseError::MissingFraction: name = "MissingFraction"; break;
             case ParseError::UnexpectedChar:  name = "UnexpectedChar";  break;
+            case ParseError::UnterminatedString: name = "UnterminatedString"; break;
+            case ParseError::InvalidEscape:      name = "InvalidEscape";      break;
+            case ParseError::InvalidUnicodeEscape:name = "InvalidUnicodeEscape"; break;
+            case ParseError::InvalidLiteral:     name = "InvalidLiteral";     break;
         }
         return std::formatter<std::string_view>::format(name, ctx);
     }
@@ -765,6 +788,184 @@ skip_whitespace_at(Span<const char>& s) noexcept {
     // size to a stored original).
     s = s.subspan(i, s.size() - i);
     return true;
+}
+
+// ===========================================================================
+// JSON scalar cursor API (NEW in v0.9.0, 2026-07-18)
+// ===========================================================================
+//
+// The v0.8.0 cursor primitives make structure walking convenient, but the
+// Jul 16 JSON-ish walker still hand-scans quoted keys and cannot read string,
+// boolean, or null values. These three functions complete the JSON scalar
+// token layer:
+//
+//   parse_string_at(s) -> expected<string, ParseError>
+//   parse_bool_at(s)   -> expected<bool, ParseError>
+//   parse_null_at(s)   -> expected<nullptr_t, ParseError>
+//
+// All three leave s unchanged on malformed input and commit it only after a
+// complete token has been validated. String parsing is intentionally not
+// noexcept because constructing the decoded std::string may allocate.
+// ===========================================================================
+namespace detail {
+
+inline int hex_digit(char c) noexcept {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+inline bool append_utf8(std::string& out, std::uint32_t cp) {
+    if (cp <= 0x7F) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FF) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0x10FFFF) {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        return false;
+    }
+    return true;
+}
+
+inline bool starts_with(Span<const char> s, std::string_view literal) noexcept {
+    if (s.size() < literal.size()) return false;
+    for (std::size_t i = 0; i < literal.size(); ++i) {
+        if (s[i] != literal[i]) return false;
+    }
+    return true;
+}
+
+}  // namespace detail
+
+inline std::expected<std::string, ParseError>
+parse_string_at(Span<const char>& s) {
+    if (s.empty()) {
+        return std::unexpected{ParseError::Empty};
+    }
+    if (s.front() != '"') {
+        return std::unexpected{ParseError::UnexpectedChar};
+    }
+
+    std::string out;
+    std::size_t i = 1;  // skip the opening quote in the local cursor
+    while (i < s.size()) {
+        const char c = s[i];
+        if (c == '"') {
+            s = s.subspan(i + 1, s.size() - (i + 1));
+            return out;
+        }
+        if (static_cast<unsigned char>(c) < 0x20) {
+            return std::unexpected{ParseError::InvalidEscape};
+        }
+        if (c != '\\') {
+            out.push_back(c);
+            ++i;
+            continue;
+        }
+
+        ++i;  // consume the backslash locally; commit happens only on success
+        if (i >= s.size()) {
+            return std::unexpected{ParseError::UnterminatedString};
+        }
+        const char escaped = s[i++];
+        switch (escaped) {
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case '/':  out.push_back('/');  break;
+            case 'b':  out.push_back('\b'); break;
+            case 'f':  out.push_back('\f'); break;
+            case 'n':  out.push_back('\n'); break;
+            case 'r':  out.push_back('\r'); break;
+            case 't':  out.push_back('\t'); break;
+            case 'u': {
+                if (i + 4 > s.size()) {
+                    return std::unexpected{ParseError::InvalidUnicodeEscape};
+                }
+                std::uint32_t code_unit = 0;
+                for (std::size_t digit = 0; digit < 4; ++digit) {
+                    const int value = detail::hex_digit(s[i + digit]);
+                    if (value < 0) {
+                        return std::unexpected{ParseError::InvalidUnicodeEscape};
+                    }
+                    code_unit = (code_unit << 4) | static_cast<std::uint32_t>(value);
+                }
+                i += 4;
+
+                std::uint32_t code_point = code_unit;
+                if (code_unit >= 0xD800 && code_unit <= 0xDBFF) {
+                    // A high surrogate must be immediately followed by a
+                    // low-surrogate escape. Decode the pair to one code point.
+                    if (i + 6 > s.size() || s[i] != '\\' || s[i + 1] != 'u') {
+                        return std::unexpected{ParseError::InvalidUnicodeEscape};
+                    }
+                    std::uint32_t low = 0;
+                    for (std::size_t digit = 0; digit < 4; ++digit) {
+                        const int value = detail::hex_digit(s[i + 2 + digit]);
+                        if (value < 0) {
+                            return std::unexpected{ParseError::InvalidUnicodeEscape};
+                        }
+                        low = (low << 4) | static_cast<std::uint32_t>(value);
+                    }
+                    if (low < 0xDC00 || low > 0xDFFF) {
+                        return std::unexpected{ParseError::InvalidUnicodeEscape};
+                    }
+                    i += 6;
+                    code_point = 0x10000u
+                        + ((code_unit - 0xD800u) << 10)
+                        + (low - 0xDC00u);
+                } else if (code_unit >= 0xDC00 && code_unit <= 0xDFFF) {
+                    // A low surrogate without a preceding high surrogate is
+                    // not a valid JSON Unicode escape sequence.
+                    return std::unexpected{ParseError::InvalidUnicodeEscape};
+                }
+                if (!detail::append_utf8(out, code_point)) {
+                    return std::unexpected{ParseError::InvalidUnicodeEscape};
+                }
+                break;
+            }
+            default:
+                return std::unexpected{ParseError::InvalidEscape};
+        }
+    }
+    return std::unexpected{ParseError::UnterminatedString};
+}
+
+inline std::expected<bool, ParseError>
+parse_bool_at(Span<const char>& s) noexcept {
+    if (s.empty()) {
+        return std::unexpected{ParseError::Empty};
+    }
+    if (detail::starts_with(s, "true")) {
+        s = s.subspan(4, s.size() - 4);
+        return true;
+    }
+    if (detail::starts_with(s, "false")) {
+        s = s.subspan(5, s.size() - 5);
+        return false;
+    }
+    return std::unexpected{ParseError::InvalidLiteral};
+}
+
+inline std::expected<std::nullptr_t, ParseError>
+parse_null_at(Span<const char>& s) noexcept {
+    if (s.empty()) {
+        return std::unexpected{ParseError::Empty};
+    }
+    if (!detail::starts_with(s, "null")) {
+        return std::unexpected{ParseError::InvalidLiteral};
+    }
+    s = s.subspan(4, s.size() - 4);
+    return nullptr;
 }
 
 }  // namespace psp
