@@ -63,8 +63,8 @@
 
 cmake_minimum_required(VERSION 3.16)
 project(psp_span_lib
-    VERSION 0.9.0
-    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (whole-span and streaming numeric cursor + non-numeric cursor + JSON scalar token cursors with std::expected<T, ParseError>); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
+    VERSION 0.10.0
+    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (whole-span and streaming numeric cursor + non-numeric cursor + JSON scalar token cursors with std::expected<T, ParseError>) + a complete general JSON parser header (<psp_span/json.h>: JsonValue sum type, parse_value_at/parse_array_at/parse_object_at, json_to_string pretty-printer, typed ParseError::DuplicateKey); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
     LANGUAGES CXX
 )
 
@@ -152,7 +152,8 @@ endif()
 #   ├── include/
 #   │   └── psp_span/
 #   │       ├── span.h
-#   │       └── parser.h                          (added 2026-07-14; cursor primitives added 2026-07-16)
+#   │       ├── parser.h                          (added 2026-07-14; cursor primitives added 2026-07-16; JSON scalar token cursors added 2026-07-18; ParseError::DuplicateKey added 2026-07-20)
+#   │       └── json.h                            (added 2026-07-20 — complete general JSON parser: parse_value_at / parse_array_at / parse_object_at, JsonValue, json_to_string)
 #   └── lib/
 #       ├── libpsp_span_lib.a
 #       └── cmake/
@@ -197,6 +198,7 @@ install(TARGETS psp_span_lib
 install(FILES
     include/psp_span/span.h
     include/psp_span/parser.h
+    include/psp_span/json.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psp_span
 )
 
@@ -267,6 +269,17 @@ install(FILES
 )
 
 message(STATUS "==================================================")
+# 2026-07-20: bumped 0.9.0 -> 0.10.0 — a new public header <psp_span/json.h>
+# ships in the library proper, supplying a complete general JSON
+# parser (parse_value_at / parse_array_at / parse_object_at) +
+# JsonValue + json_to_string pretty-printer. The new header is
+# built entirely on the v0.9.0 cursor primitives (no new cursor
+# primitives were required). The parser header itself gained one
+# new ParseError enumerator, DuplicateKey, and the
+# std::formatter<ParseError> case to match — duplicate JSON keys
+# are now reported via the typed enumerator instead of overloading
+# UnexpectedChar as the Jul 18 / Jul 19 consumers did.
+#
 # 2026-07-18: bumped 0.8.0 -> 0.9.0 — parser.h now includes JSON
 # scalar token cursors (parse_string_at, parse_bool_at, parse_null_at)
 # plus typed string/literal errors. The Jul 18 consumer exercises

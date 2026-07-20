@@ -88,6 +88,21 @@
 // been validated. Allocation is possible for std::string results, so the
 // string parser is not marked noexcept; malformed input is still reported
 // through std::expected rather than exceptions.
+//
+// What's NEW in 2026-07-20 (v0.10.0) — JSON parser header:
+//   - A new public header `<psp_span/json.h>` joins the library. It
+//     supplies a complete general JSON parser (parse_value_at /
+//     parse_array_at / parse_object_at, the recursive-descent
+//     dispatcher and the two structural parsers) plus a JsonValue
+//     sum type and a json_to_string pretty-printer. It is built
+//     entirely on the v0.9.0 cursor primitives — no new cursor
+//     primitives are required.
+//   - One new ParseError enumerator, DuplicateKey, replaces the
+//     "this is also UnexpectedChar" overload the Jul 18 / Jul 19
+//     consumers used. Consumers that ship their own ad-hoc JSON
+//     parsers should switch to this typed enumerator now.
+//   - The parser header itself is unchanged in its API; only the
+//     enum and the formatter gained one case.
 
 #ifndef PSP_SPAN_PARSER_H_INCLUDED
 #define PSP_SPAN_PARSER_H_INCLUDED
@@ -147,6 +162,11 @@ enum class ParseError {
     InvalidEscape,       // parse_string_at: unknown escape after '\\'
     InvalidUnicodeEscape,// parse_string_at: malformed \\uXXXX or surrogate pair
     InvalidLiteral,      // parse_bool_at/parse_null_at: token did not match
+    DuplicateKey,        // JSON object: a second member with the same key was seen
+                         // (this is the JSON parser layer reporting the dup-key
+                         // case via a typed enumerator instead of overloading
+                         // UnexpectedChar; added 2026-07-20 with v0.10.0's
+                         // <psp_span/json.h> promotion)
 };
 
 // ---------------------------------------------------------------------------
@@ -174,6 +194,7 @@ struct std::formatter<ParseError> : std::formatter<std::string_view> {
             case ParseError::InvalidEscape:      name = "InvalidEscape";      break;
             case ParseError::InvalidUnicodeEscape:name = "InvalidUnicodeEscape"; break;
             case ParseError::InvalidLiteral:     name = "InvalidLiteral";     break;
+            case ParseError::DuplicateKey:       name = "DuplicateKey";       break;
         }
         return std::formatter<std::string_view>::format(name, ctx);
     }
