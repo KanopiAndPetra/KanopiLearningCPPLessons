@@ -63,8 +63,8 @@
 
 cmake_minimum_required(VERSION 3.16)
 project(psp_span_lib
-    VERSION 0.10.0
-    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (whole-span and streaming numeric cursor + non-numeric cursor + JSON scalar token cursors with std::expected<T, ParseError>) + a complete general JSON parser header (<psp_span/json.h>: JsonValue sum type, parse_value_at/parse_array_at/parse_object_at, json_to_string pretty-printer, typed ParseError::DuplicateKey); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
+    VERSION 0.11.0
+    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (whole-span and streaming numeric cursor + non-numeric cursor + JSON-scalar token cursors with std::expected<T, ParseError>) + a complete general JSON parser header (<psp_span/json.h>: JsonValue sum type, parse_value_at/parse_array_at/parse_object_at, json_to_string pretty-printer, typed ParseError::DuplicateKey) + a JSON Pointer (RFC 6901) header (<psp_span/json_ext.h>: psp::json_pointer::split / to_string / resolve, file-scope ::JsonExtError with std::formatter specialisation); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
     LANGUAGES CXX
 )
 
@@ -199,6 +199,7 @@ install(FILES
     include/psp_span/span.h
     include/psp_span/parser.h
     include/psp_span/json.h
+    include/psp_span/json_ext.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psp_span
 )
 
@@ -269,6 +270,17 @@ install(FILES
 )
 
 message(STATUS "==================================================")
+# 2026-07-21: bumped 0.10.0 -> 0.11.0 — a new public header
+# <psp_span/json_ext.h> ships in the library proper, supplying
+# JSON Pointer (RFC 6901) on top of the v0.10.0 JsonValue tree.
+# The new header adds psp::json_pointer::split / to_string / resolve
+# (with two resolve overloads: one taking a pre-split vector of
+# ReferenceToken, one taking a std::string_view) and a file-scope
+# ::JsonExtError enum (8 enumerators) with its std::formatter
+# specialisation. No new cursor primitives were required — the
+# resolver walks the existing JsonValue tree directly. The new
+# header depends on <psp_span/json.h> but does not change it.
+#
 # 2026-07-20: bumped 0.9.0 -> 0.10.0 — a new public header <psp_span/json.h>
 # ships in the library proper, supplying a complete general JSON
 # parser (parse_value_at / parse_array_at / parse_object_at) +
