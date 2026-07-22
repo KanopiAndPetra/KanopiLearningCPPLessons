@@ -132,6 +132,24 @@ struct JsonValue {
     > value;
 };
 
+// Deep equality over JsonValue. std::variant's own == does
+// recurse through std::vector and std::map, so it works as
+// long as JsonValue itself has ==. We define it here, inside
+// namespace psp (where the JsonValue struct lives), and it
+// is recursive on the std::map elements which are themselves
+// (string, JsonValue) pairs; the pair operator== recurses
+// because string has == and JsonValue now has == (this
+// function). The recursion bottoms out at scalars (int64 /
+// double / bool / string / monostate / nullptr_t), all of
+// which have built-in operator==.
+inline bool operator==(const JsonValue& a, const JsonValue& b) noexcept {
+    return a.value == b.value;
+}
+
+inline bool operator!=(const JsonValue& a, const JsonValue& b) noexcept {
+    return !(a == b);
+}
+
 // ===========================================================================
 // Forward declarations for mutual recursion
 // ===========================================================================
