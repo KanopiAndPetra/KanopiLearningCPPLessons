@@ -63,8 +63,8 @@
 
 cmake_minimum_required(VERSION 3.16)
 project(psp_span_lib
-    VERSION 0.12.0
-    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (whole-span and streaming numeric cursor + non-numeric cursor + JSON-scalar token cursors with std::expected<T, ParseError>) + a complete general JSON parser header (<psp_span/json.h>: JsonValue sum type, parse_value_at/parse_array_at/parse_object_at, json_to_string pretty-printer, typed ParseError::DuplicateKey) + a JSON Pointer (RFC 6901) + JSON Patch (RFC 6902) header (<psp_span/json_ext.h>: psp::json_pointer::split / to_string / resolve / resolve_mut; psp::json_patch::patch; file-scope ::JsonExtError (8 enumerators) + ::JsonPatchOp (RFC 6902 tagged-union of 6 ops) + ::JsonPatchError (10 enumerators) with their std::formatter specialisations); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
+    VERSION 0.13.0
+    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (whole-span and streaming numeric cursor + non-numeric cursor + JSON-scalar token cursors with std::expected<T, ParseError>) + a complete general JSON parser header (<psp_span/json.h>: JsonValue sum type, parse_value_at/parse_array_at/parse_object_at, json_to_string, operator==/!=, ParseError::DuplicateKey typed) + a JSON Pointer (RFC 6901) + JSON Patch (RFC 6902) header (<psp_span/json_ext.h>: psp::json_pointer::split / to_string / resolve / resolve_mut; psp::json_patch::patch; psp::json_patch::parse_patch_document (RFC 6902 §3 wire-format parser); file-scope ::JsonExtError (8 enumerators) + ::JsonPatchOp (RFC 6902 tagged-union of 6 ops) + ::JsonPatchError (13 enumerators) with their std::formatter specialisations); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
     LANGUAGES CXX
 )
 
@@ -270,6 +270,26 @@ install(FILES
 )
 
 message(STATUS "==================================================")
+# 2026-07-23: bumped 0.12.0 -> 0.13.0 — <psp_span/json_ext.h> gains
+# psp::json_patch::parse_patch_document, the RFC 6902 §3 wire-format
+# parser. Takes a string_view containing a JSON Patch document
+# (a JSON array of op objects), parses it via the v0.10.0 parser,
+# validates each op object's field shape, and assembles a
+# std::vector<JsonPatchOp> ready to hand to psp::json_patch::patch.
+# This closes the round-trip:
+#   bytes in via parse_value_at  -> JsonValue tree
+#   tree walked field by field   -> std::vector<JsonPatchOp>
+#   patch() applied              -> mutated JsonValue tree
+#   bytes out via json_to_string -> round-trippable text
+# Three new JsonPatchError enumerators cover the parser's failure
+# modes: BadDocument (top-level wasn't an array of objects, or the
+# "op" string was an unrecognized name), MissingField (e.g. no
+# "path", "from", or "value" as appropriate), WrongType (e.g. "op"
+# was a number). ::JsonPatchError grows from 10 to 13 enumerators.
+# Unknown extra members of an op object are silently ignored,
+# matching RFC 6902 §3. The Pointer + Patch halves from v0.12.0 are
+# unchanged; v0.13.0 is a strict superset.
+#
 # 2026-07-22: bumped 0.11.0 -> 0.12.0 — <psp_span/json_ext.h> gains
 # the RFC 6902 (JSON Patch) half on top of the RFC 6901 (Pointer)
 # half that shipped in v0.11.0. The new public API adds:

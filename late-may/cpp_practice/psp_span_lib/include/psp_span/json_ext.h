@@ -16,8 +16,10 @@
 //   - psp::json_pointer::resolve_mut   (mutable overload — for Patch)
 //   - ::JsonExtError (8 enumerators + std::formatter spec)
 //   - ::JsonPatchOp     (RFC 6902 tagged-union of 6 ops)
-//   - ::JsonPatchError  (12 enumerators + std::formatter spec)
+//   - ::JsonPatchError  (13 enumerators + std::formatter spec)
 //   - psp::json_patch::patch(JsonValue&, ops) (RFC 6902 §1 engine)
+//   - psp::json_patch::parse_patch_document(string_view)
+//                                  (RFC 6902 §3 wire-format parser)
 //
 // What's NOT in this header
 // -------------------------
@@ -35,8 +37,13 @@
 //                       resolve, JsonExtError, formatter).
 // v0.12.0 (2026-07-22): Patch half (resolve_mut, JsonPatchOp,
 //                       JsonPatchError, json_patch::patch).
-// The Pointer half is unchanged from v0.11.0; v0.12.0 is a
-// strict superset.
+// v0.13.0 (2026-07-23): RFC 6902 §3 wire-format parser
+//                       (psp::json_patch::parse_patch_document);
+//                       JsonPatchError grows by 3 enumerators
+//                       (BadDocument, MissingField, WrongType).
+//                       The Pointer + Patch halves from v0.12.0
+//                       are unchanged; v0.13.0 is a strict
+//                       superset.
 
 #ifndef PSP_SPAN_JSON_EXT_H_INCLUDED
 #define PSP_SPAN_JSON_EXT_H_INCLUDED
@@ -260,6 +267,20 @@ enum class JsonPatchError {
                              // by the std::visit failure guard).
     MoveWouldClobber,        // MoveOp's `from` is a strict
                              // ancestor of `path` (RFC 6902 §4.4).
+    BadDocument,             // parse_patch_document: the input
+                             // wasn't a JSON array of objects
+                             // (e.g. parse_value_at failed, the
+                             // top-level wasn't an array, or an
+                             // element wasn't an object). NEW
+                             // in v0.13.0.
+    MissingField,            // parse_patch_document: an op object
+                             // lacked a required field (e.g.
+                             // "path", "from", or "value"). NEW
+                             // in v0.13.0.
+    WrongType,               // parse_patch_document: a field had
+                             // the wrong JSON type (e.g. "op"
+                             // was a number, "path" was an
+                             // object). NEW in v0.13.0.
 };
 
 template <>
@@ -277,6 +298,9 @@ struct std::formatter<JsonPatchError> : std::formatter<std::string_view> {
             case JsonPatchError::TestValueMismatch:       name = "TestValueMismatch";       break;
             case JsonPatchError::UnknownOp:               name = "UnknownOp";               break;
             case JsonPatchError::MoveWouldClobber:        name = "MoveWouldClobber";        break;
+            case JsonPatchError::BadDocument:             name = "BadDocument";             break;
+            case JsonPatchError::MissingField:            name = "MissingField";            break;
+            case JsonPatchError::WrongType:               name = "WrongType";               break;
         }
         return std::formatter<std::string_view>::format(name, ctx);
     }
@@ -940,6 +964,243 @@ patch(JsonValue& root,
         if (!r) return std::unexpected{r.error()};
     }
     return {};
+}
+
+}  // namespace json_patch
+}  // namespace psp
+
+// ===========================================================================
+// psp::json_patch::parse_patch_document — RFC 6902 §3 wire-format parser
+// ===========================================================================
+//
+// RFC 6902 §3 defines the wire format of a JSON Patch document as a
+// JSON array of operation objects. Each operation object MUST have an
+// "op" string member naming one of the six ops ("add", "remove",
+// "replace", "move", "copy", "test"), a "path" string member pointing
+// at the target, and (depending on the op) a "value" member or a
+// "from" member:
+//
+//     [
+//       { "op": "test",   "path": "/a/b/c",       "value": "foo"   },
+//       { "op": "remove", "path": "/a/b/c"                          },
+//       { "op": "add",    "path": "/a/b/c",       "value": [1,2,3] },
+//       { "op": "replace","path": "/a/b/c",       "value": 42      },
+//       { "op": "move",   "from": "/a/b",         "path": "/a/d"   },
+//       { "op": "copy",   "from": "/a/d",         "path": "/a/e"   }
+//     ]
+//
+// This function parses a string_view containing such a document and
+// returns a std::vector<JsonPatchOp> ready to hand to
+// psp::json_patch::patch. The function is the bridge between the
+// RFC 6902 §3 wire format (what the user wrote) and the in-memory
+// form the engine consumes (what the user types in C++). Building it
+// closes the round-trip:
+//
+//     bytes in via parse_value_at  → JsonValue tree
+//     tree walked field by field   → std::vector<JsonPatchOp>
+//     patch() applied              → mutated JsonValue tree
+//     bytes out via json_to_string → round-trippable text
+//
+// Errors are reported as JsonPatchError:
+//
+//   - BadDocument   - top-level wasn't a JSON array of objects;
+//                     parse_value_at failed; or an element wasn't
+//                     an object. Includes the case of an "op" field
+//                     whose value isn't one of the six known names
+//                     (because the document doesn't describe a
+//                     recognized operation at all).
+//   - MissingField  - an op object lacked a required field ("path"
+//                     for any op; "value" for add/replace/test;
+//                     "from" for move/copy).
+//   - WrongType     - a field had the wrong JSON type (e.g. "op"
+//                     was a number, "path" was an object).
+//
+// The function is "best-effort": on error, it stops at the first
+// bad op and returns std::unexpected. The vector is move-constructed
+// from per-op builders, so no allocation overhead beyond what the
+// vector needs.
+//
+// Implementation note: the function takes string_view, builds a
+// std::string copy to hand to parse_value_at (which takes
+// Span<const char>&). The copy is necessary because parse_value_at
+// shrinks the span as it parses but doesn't free the storage; the
+// caller still owns the original string_view's bytes. The patch
+// document's expected size (KBs, not MBs) makes a one-time copy the
+// right ergonomic trade.
+//
+// Helper rationale: the function is split into one outer driver
+// (parse_patch_document) and one inner per-op builder
+// (build_one_op). build_one_op is the spot where the typed field
+// checks live; parse_patch_document is just the array walk + the
+// call to parse_value_at. This keeps the function readable (~70
+// lines for the driver, ~80 for the inner builder) and lets unit
+// tests of the inner builder reuse cases without re-parsing the
+// whole document.
+namespace psp {
+namespace json_patch {
+
+namespace detail {
+
+// Field-key lookup helper. Returns a pointer to the JsonValue for
+// the given key if the object has it, or nullptr otherwise. The
+// caller checks for nullptr as "MissingField"; then checks the
+// variant alternative to determine "WrongType" vs. OK.
+//
+// Takes a JsonValue by pointer (rather than std::map::find) so the
+// caller can decide whether "missing" means "absent" or "absent +
+// unexpected type" — both come up in the same op-builder.
+inline const psp::JsonValue*
+find_field(const std::map<std::string, psp::JsonValue>& obj,
+           const char* key) noexcept {
+    auto it = obj.find(key);
+    if (it == obj.end()) return nullptr;
+    return &it->second;
+}
+
+// Per-op builder. Takes one op object (already verified to be a
+// JSON object — that's the caller's responsibility) and returns
+// either a JsonPatchOp or a typed JsonPatchError. The function
+// uses small lambdas to keep the per-op logic together.
+//
+// Field semantics:
+//   "op"    MUST be a string naming one of "add"/"remove"/
+//           "replace"/"move"/"copy"/"test".
+//   "path"  MUST be a string for every op.
+//   "value" MUST exist AND be a JSON value (any alternative of
+//           JsonValue) for add/replace/test. RFC 6902 allows
+//           `value` to be any JSON value, including null.
+//   "from"  MUST be a string for move/copy.
+//
+// Unknown extra members are SILENTLY IGNORED, matching RFC 6902
+// §3 ("Members not specified... MUST be ignored"). This is also
+// what most production Patch processors do.
+inline std::expected<JsonPatchOp, JsonPatchError>
+build_one_op(const std::map<std::string, psp::JsonValue>& obj) noexcept {
+    // ---- "op" ----
+    const psp::JsonValue* op_field = find_field(obj, "op");
+    if (!op_field) {
+        return std::unexpected{JsonPatchError::MissingField};
+    }
+    if (!std::holds_alternative<std::string>(op_field->value)) {
+        return std::unexpected{JsonPatchError::WrongType};
+    }
+    const std::string& op_name = std::get<std::string>(op_field->value);
+
+    // ---- "path" (mandatory for every op) ----
+    const psp::JsonValue* path_field = find_field(obj, "path");
+    if (!path_field) {
+        return std::unexpected{JsonPatchError::MissingField};
+    }
+    if (!std::holds_alternative<std::string>(path_field->value)) {
+        return std::unexpected{JsonPatchError::WrongType};
+    }
+    const std::string path = std::get<std::string>(path_field->value);
+
+    // Dispatch on the op name. Each branch either returns an
+    // unexpected<> (typed error) or a JsonPatchOp wrapping the
+    // matching struct. "value" is moved (not copied) out of the
+    // object — the caller doesn't need the field any more.
+    if (op_name == "add") {
+        const psp::JsonValue* v = find_field(obj, "value");
+        if (!v) return std::unexpected{JsonPatchError::MissingField};
+        // RFC 6902 §4.1: "value" can be any JSON value, INCLUDING
+        // null. So we don't reject std::nullptr_t. monostate (the
+        // "unset" alternative of JsonValue) is an internal sentinel
+        // a parsed JSON document shouldn't produce; we still treat
+        // it as WrongType because nothing in the parser produces it
+        // for a real input — if you got it, something is wrong.
+        if (std::holds_alternative<std::monostate>(v->value)) {
+            return std::unexpected{JsonPatchError::WrongType};
+        }
+        return JsonPatchOp{AddOp{path, *v}};
+    }
+    if (op_name == "remove") {
+        return JsonPatchOp{RemoveOp{path}};
+    }
+    if (op_name == "replace") {
+        const psp::JsonValue* v = find_field(obj, "value");
+        if (!v) return std::unexpected{JsonPatchError::MissingField};
+        if (std::holds_alternative<std::monostate>(v->value)) {
+            return std::unexpected{JsonPatchError::WrongType};
+        }
+        return JsonPatchOp{ReplaceOp{path, *v}};
+    }
+    if (op_name == "move") {
+        const psp::JsonValue* from_field = find_field(obj, "from");
+        if (!from_field) return std::unexpected{JsonPatchError::MissingField};
+        if (!std::holds_alternative<std::string>(from_field->value)) {
+            return std::unexpected{JsonPatchError::WrongType};
+        }
+        const std::string from = std::get<std::string>(from_field->value);
+        return JsonPatchOp{MoveOp{from, path}};
+    }
+    if (op_name == "copy") {
+        const psp::JsonValue* from_field = find_field(obj, "from");
+        if (!from_field) return std::unexpected{JsonPatchError::MissingField};
+        if (!std::holds_alternative<std::string>(from_field->value)) {
+            return std::unexpected{JsonPatchError::WrongType};
+        }
+        const std::string from = std::get<std::string>(from_field->value);
+        return JsonPatchOp{CopyOp{from, path}};
+    }
+    if (op_name == "test") {
+        const psp::JsonValue* v = find_field(obj, "value");
+        if (!v) return std::unexpected{JsonPatchError::MissingField};
+        if (std::holds_alternative<std::monostate>(v->value)) {
+            return std::unexpected{JsonPatchError::WrongType};
+        }
+        return JsonPatchOp{TestOp{path, *v}};
+    }
+
+    // Unknown "op" name (e.g. {"op": "frobnicate", ...}). RFC 6902
+    // §3 doesn't define a behavior for this — most production
+    // processors reject. We use BadDocument (not UnknownOp, which
+    // the engine uses for internal variant dispatch failures).
+    return std::unexpected{JsonPatchError::BadDocument};
+}
+
+}  // namespace detail
+
+inline std::expected<std::vector<JsonPatchOp>, JsonPatchError>
+parse_patch_document(std::string_view doc) noexcept {
+    // 1. Parse the entire document via the existing parser. The
+    //    string is copied once here so parse_value_at has stable
+    //    storage to shrink into.
+    std::string buf{doc};
+    psp::Span<const char> sp{buf.data(), buf.size()};
+    auto parsed = psp::parse_value_at(sp);
+    if (!parsed) {
+        return std::unexpected{JsonPatchError::BadDocument};
+    }
+
+    // 2. Top level MUST be a JSON array of objects.
+    if (!std::holds_alternative<std::vector<psp::JsonValue>>(
+            parsed->value)) {
+        return std::unexpected{JsonPatchError::BadDocument};
+    }
+    const auto& arr = std::get<std::vector<psp::JsonValue>>(
+        parsed->value);
+
+    // 3. Build one JsonPatchOp per element.
+    std::vector<JsonPatchOp> out;
+    out.reserve(arr.size());
+    for (const psp::JsonValue& elem : arr) {
+        // Each element MUST be a JSON object.
+        if (!std::holds_alternative<
+                std::map<std::string, psp::JsonValue>>(elem.value)) {
+            return std::unexpected{JsonPatchError::BadDocument};
+        }
+        const auto& obj = std::get<
+            std::map<std::string, psp::JsonValue>>(elem.value);
+
+        auto built = detail::build_one_op(obj);
+        if (!built) {
+            return std::unexpected{built.error()};
+        }
+        out.push_back(std::move(*built));
+    }
+
+    return out;
 }
 
 }  // namespace json_patch
