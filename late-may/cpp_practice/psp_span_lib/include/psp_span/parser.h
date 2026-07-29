@@ -103,6 +103,31 @@
 //     parsers should switch to this typed enumerator now.
 //   - The parser header itself is unchanged in its API; only the
 //     enum and the formatter gained one case.
+//
+// What's NEW in 2026-07-27 (v0.14.0) — signed numeric literals:
+//   - `parse_int` and `parse_int_at` now accept an optional leading
+//     '+' or '-' (was LeadingSign in v0.13.0; now NotADigit for
+//     a bare sign with no following digits). '-' negates the
+//     result; '+' is a no-op. RFC 8259 §6 requires JSON numbers
+//     to accept a leading minus, so this aligns the parser with
+//     the JSON dispatcher's expectations.
+//   - `parse_double` and `parse_double_at` likewise accept an
+//     optional leading sign. The whole-span and streaming parsers
+//     use the same sign policy now (was inconsistent in v0.13.0:
+//     `parse_double` rejected leading signs but `parse_double_at`
+//     accepted them via the JSON dispatcher fallback).
+//   - The overflow check in `parse_int` / `parse_int_at` is widened
+//     from INT_MAX to INT64_MAX; the function now returns
+//     `std::expected<std::int64_t, ParseError>` (was `int`) to
+//     match the `JsonValue` int alternative. This is a (small)
+//     breaking change for any consumer that binds `parse_int`'s
+//     result to `int`; a grep-all-consumers check during the
+//     promotion confirmed no existing consumer does so.
+//   - `parse_uint_at` is unchanged in API; the leading '+' it
+//     accepted in v0.13.0 is still accepted, '-' is still rejected.
+//   - All four changes are mechanical; the Jul 25 consumer
+//     (P-2026-07-25-psp-json-negative-numbers.cpp) proved the
+//     v0.14.0 shape end-to-end before this header was promoted.
 
 #ifndef PSP_SPAN_PARSER_H_INCLUDED
 #define PSP_SPAN_PARSER_H_INCLUDED
@@ -203,28 +228,62 @@ struct std::formatter<ParseError> : std::formatter<std::string_view> {
 namespace psp {
 
 // ---------------------------------------------------------------------------
-// parse_int — parse a non-empty sequence of decimal digits.
+// parse_int — parse a (signed) decimal integer literal.
 //
 // Failure modes:
 //   - Empty           -> Span is empty.
-//   - LeadingSign     -> First char is '+' or '-'. We refuse both
-//                        (sign-handling is a downstream policy choice,
-//                        not the parser's job; rejecting them forces the
-//                        caller to handle signs explicitly).
-//   - NotADigit       -> Any char outside '0'..'9'.
-//   - Overflow        -> Accumulator would exceed std::numeric_limits<int>::max().
+//   - NotADigit       -> Any char outside an optional leading sign
+//                        ('+' or '-') and '0'..'9'. A bare sign
+//                        with no following digits is also NotADigit.
+//   - Overflow        -> Accumulator would exceed
+//                        std::numeric_limits<std::int64_t>::max().
+//
+// Sign policy (NEW in v0.14.0): leading '+' or '-' is accepted.
+//   - '+' is a no-op; matches strtod's convention.
+//   - '-' negates the result; matches RFC 8259 §6 which requires
+//     JSON numbers to accept a leading minus.
+//
+//   The pre-v0.14.0 behaviour was to reject both signs with
+//   LeadingSign; that was the right behaviour at the time (sign
+//   handling was a downstream policy choice) but is a routing bug
+//   given that <psp_span/json.h>'s `parse_value_at` already routes
+//   '-' to `parse_double_at`. Accepting both signs aligns the four
+//   numeric parsers with the JSON dispatcher's expectations and
+//   lets negative-value JsonValues reach the parser without the
+//   caller having to pre-strip the sign.
+//
+// Return type (widened in v0.14.0): was `std::expected<int, ...>`
+//   in v0.13.0; now `std::expected<std::int64_t, ...>` to match
+//   the `JsonValue` int alternative (which is `std::int64_t`).
+//   This is a (small) breaking change for any consumer that binds
+//   `parse_int`'s result to `int`; a grep-all-consumers check
+//   during the v0.14.0 promotion confirmed no existing consumer
+//   does so (they all funnel the result straight into JsonValue
+//   via `out.value = *r`).
 //
 // noexcept: every failure becomes an std::expected-returned error;
 // the function never throws, so consumers can rely on it for the
 // move_if_noexcept / strong-guarantee decisions (Jun 12 lesson).
 // ---------------------------------------------------------------------------
-inline std::expected<int, ParseError>
+inline std::expected<std::int64_t, ParseError>
 parse_int(Span<const char> s) noexcept {
     if (s.empty()) {
         return std::unexpected{ParseError::Empty};
     }
+
+    // Optional leading sign. A bare sign with no following digits
+    // is reported as NotADigit (matches pre-v0.14.0 behaviour for
+    // a bare '+' or '-'; the sign was once rejected outright as
+    // LeadingSign, now accepted-with-no-digits as NotADigit, since
+    // the new policy is "signs are digits' best friends, not
+    // forbidden territory").
+    bool negative = false;
     if (s.front() == '+' || s.front() == '-') {
-        return std::unexpected{ParseError::LeadingSign};
+        negative = (s.front() == '-');
+        s = s.subspan(1, s.size() - 1);
+        if (s.empty()) {
+            return std::unexpected{ParseError::NotADigit};
+        }
     }
 
     std::int64_t acc = 0;
@@ -232,12 +291,24 @@ parse_int(Span<const char> s) noexcept {
         if (c < '0' || c > '9') {
             return std::unexpected{ParseError::NotADigit};
         }
-        acc = acc * 10 + (c - '0');
-        if (acc > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+        // Widened in v0.14.0: was `std::numeric_limits<int>::max()`,
+        // matching the now-also-widened return type. Values larger
+        // than ~9.2e18 still overflow, but the full int64 range is
+        // available — which matches the `JsonValue` int alternative.
+        if (acc > std::numeric_limits<std::int64_t>::max() / 10
+            || (acc == std::numeric_limits<std::int64_t>::max() / 10
+                && (c - '0') > static_cast<char>(
+                    std::numeric_limits<std::int64_t>::max() % 10))) {
             return std::unexpected{ParseError::Overflow};
         }
+        acc = acc * 10 + (c - '0');
     }
-    return static_cast<int>(acc);
+    if (negative) {
+        // Negation is safe because we capped acc at INT64_MAX/10
+        // + INT64_MAX%10 during the loop; the result fits in int64.
+        acc = -acc;
+    }
+    return acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,16 +321,40 @@ parse_int(Span<const char> s) noexcept {
 //   [-+]? DIGITS ( '.' DIGITS )? ( [eE] [-+]? DIGITS )?
 //
 // Examples that parse successfully:
-//   "0", "1", "42", "3.14", ".5", "1.", "1e10", "1.5E-3", "0.0001"
+//   "0", "1", "42", "3.14", ".5", "1.", "1e10", "1.5E-3", "0.0001",
+//   "-3.14", "-0", "+1", "-1.5e3"
 //
 // Examples that fail with a typed error:
 //   ""           -> Empty
-//   "+1"         -> LeadingSign   (we reject leading signs the same way parse_int does)
+//   "+"          -> NotADigit (NEW in v0.14.0: was LeadingSign before)
 //   "1.2.3"      -> NotADigit     (a second '.' is not a digit)
 //   "1e"         -> BadExponent
 //   "1."         -> success (the '.' is optional-fraction here)
 //   "."          -> MissingFraction ('.' alone has no digits on either side)
 //   "999...e999" -> Overflow (caught at the int accumulation steps)
+//
+// Sign policy (NEW in v0.14.0): leading '+' or '-' is accepted.
+//   See parse_int above for the rationale (was LeadingSign in
+//   v0.13.0; now accepted-with-no-digits as NotADigit; '-' negates
+//   the result, '+' is a no-op).
+//
+// Overflow check (NEW in v0.14.0): the int_part accumulator is
+//   range-checked against std::numeric_limits<std::int64_t>::max().
+//   The pre-v0.14.0 check was int-sized; we widen it to int64-sized
+//   so that the JSON dispatcher can route INT64_MAX-shaped integers
+//   through parse_double_at and store them as JsonValue's int64_t
+//   alternative (the dispatcher's int64-vs-double preservation guard
+//   is also widened to int64 in <psp_span/json.h>, so an int-shaped
+//   int_part overflow check here would defeat the dispatcher's
+//   promotion). The double arithmetic below `static_cast<double>(int_part)`
+//   loses precision above 2^53 (~9e15), so very large int_parts would
+//   still round to an imprecise double; but the dispatcher's int64
+//   guard fires on the precise condition "trunc(d) == d AND d is in
+//   int64 range", which means a double that rounds above 2^53 cannot
+//   come back as a JsonValue int64 anyway. Widening the int_part
+//   overflow check here is the right fix.
+//   parse_int is the meaningful widening for the JSON value tree
+//   (since JsonValue's int alternative IS int64).
 //
 // Implementation notes:
 //   - The integer and fractional parts are accumulated as int64 (so
@@ -276,8 +371,15 @@ parse_double(Span<const char> s) noexcept {
     if (s.empty()) {
         return std::unexpected{ParseError::Empty};
     }
+
+    // Optional leading sign (NEW in v0.14.0).
+    bool negative = false;
     if (s.front() == '+' || s.front() == '-') {
-        return std::unexpected{ParseError::LeadingSign};
+        negative = (s.front() == '-');
+        s = s.subspan(1, s.size() - 1);
+        if (s.empty()) {
+            return std::unexpected{ParseError::NotADigit};
+        }
     }
 
     // Phase 1: integer part (zero or more digits). Stops at '.' / 'e' / end.
@@ -285,11 +387,19 @@ parse_double(Span<const char> s) noexcept {
     std::int64_t int_part = 0;
     bool        any_int_digits = false;
     while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
-        int_part = int_part * 10 + (s[i] - '0');
-        if (int_part >
-            static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+        char c = s[i];
+        // Widened in v0.14.0: was INT_MAX, now INT64_MAX. See the
+        // sign/overflow policy comment above for the rationale (the
+        // JSON dispatcher needs parse_double_at to accept
+        // INT64_MAX-shaped integer literals so it can route them to
+        // JsonValue's int64_t alternative).
+        if (int_part > std::numeric_limits<std::int64_t>::max() / 10
+            || (int_part == std::numeric_limits<std::int64_t>::max() / 10
+                && (c - '0') > static_cast<char>(
+                    std::numeric_limits<std::int64_t>::max() % 10))) {
             return std::unexpected{ParseError::Overflow};
         }
+        int_part = int_part * 10 + (c - '0');
         ++i;
         any_int_digits = true;
     }
@@ -372,6 +482,10 @@ parse_double(Span<const char> s) noexcept {
         for (std::int64_t k = 0; k < -e_total; ++k) value /= 10.0;
     }
 
+    // Apply leading-sign negation (NEW in v0.14.0).
+    if (negative) {
+        value = -value;
+    }
     return value;
 }
 
@@ -416,46 +530,71 @@ parse_double(Span<const char> s) noexcept {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// parse_int_at — consume a leading run of decimal digits, advancing s.
+// parse_int_at — consume a leading (signed) run of decimal digits,
+// advancing s.
 //
 // Failure modes:
 //   - Empty           -> s is empty. s unchanged.
-//   - LeadingSign     -> First char is '+' or '-'. s unchanged.
-//   - NotADigit       -> First char is not '0'..'9'. s unchanged.
-//   - Overflow        -> The digit run would exceed INT_MAX. s unchanged.
+//   - NotADigit       -> First char is not an optional sign followed
+//                        by '0'..'9'. A bare sign with no following
+//                        digits is also NotADigit. s unchanged.
+//   - Overflow        -> The digit run would exceed
+//                        std::numeric_limits<std::int64_t>::max().
+//                        On overflow we commit the consumed prefix
+//                        AND report Overflow (matches std::strtol's
+//                        "ERANGE after partial parse" convention).
+//
+// Sign policy (NEW in v0.14.0): leading '+' or '-' is accepted.
+//   See parse_int above for the rationale (was LeadingSign in
+//   v0.13.0; now accepted-with-no-digits as NotADigit; '-' negates
+//   the result, '+' is a no-op). When a sign is consumed the
+//   cursor advances past it (signs count as part of the numeric
+//   literal, same as strtol/strtod).
+//
+// Return type (widened in v0.14.0): was `std::expected<int, ...>`
+//   in v0.13.0; now `std::expected<std::int64_t, ...>` to match
+//   the JSON dispatcher in <psp_span/json.h> (which itself now
+//   dispatches to parse_int_at with int64 precision).
 //
 // Success: returns the parsed int in std::expected, AND s is shrunk so
-// it starts after the consumed digits. The next character in `s`
-// (after the parse) is whatever was originally after the digit run —
-// often a delimiter like ',' or ']'. The caller is responsible for
-// consuming that delimiter (a future `expect_char_at(s, ',')` would
-// be the natural next primitive, but is out of scope for today).
+// it starts after the consumed run (digits, plus optional sign).
+// The next character in `s` (after the parse) is whatever was
+// originally after the digit run — often a delimiter like ','
+// or ']'. The caller is responsible for consuming that delimiter.
 // ---------------------------------------------------------------------------
-inline std::expected<int, ParseError>
+inline std::expected<std::int64_t, ParseError>
 parse_int_at(Span<const char>& s) noexcept {
     if (s.empty()) {
         return std::unexpected{ParseError::Empty};
     }
+
+    // Optional leading sign (NEW in v0.14.0).
+    std::size_t start = 0;
+    bool        negative = false;
     if (s.front() == '+' || s.front() == '-') {
-        return std::unexpected{ParseError::LeadingSign};
+        negative = (s.front() == '-');
+        start = 1;
     }
 
     std::int64_t acc = 0;
-    std::size_t  i = 0;
+    std::size_t  i = start;
     while (i < s.size()) {
         char c = s[i];
         if (c < '0' || c > '9') {
-            if (i == 0) {
-                // The very first char is not a digit — true NotADigit,
-                // nothing consumed, s unchanged.
+            if (i == start) {
+                // The very first non-sign char is not a digit —
+                // true NotADigit, nothing consumed, s unchanged.
                 return std::unexpected{ParseError::NotADigit};
             }
             // We have at least one digit; the run ends here. Break
             // out and commit the partial read by shrinking s.
             break;
         }
-        acc = acc * 10 + (c - '0');
-        if (acc > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+        // Widened in v0.14.0: was INT_MAX, now INT64_MAX.
+        if (acc > std::numeric_limits<std::int64_t>::max() / 10
+            || (acc == std::numeric_limits<std::int64_t>::max() / 10
+                && (c - '0') > static_cast<char>(
+                    std::numeric_limits<std::int64_t>::max() % 10))) {
             // Overflow — but we already consumed at least one digit.
             // Standard cursor-parser contract: don't rewind the
             // cursor on overflow. The caller knows we got SOME digits,
@@ -464,14 +603,21 @@ parse_int_at(Span<const char>& s) noexcept {
             // recover. So we shrink s past the digit run AND report
             // Overflow. This matches the std::strtol convention, where
             // ERANGE is set even when strtol has parsed a prefix.
+            // Include the optional sign in the consumed prefix so
+            // the cursor advances cleanly past the malformed run.
             s = s.subspan(i + 1, s.size() - (i + 1));
             return std::unexpected{ParseError::Overflow};
         }
+        acc = acc * 10 + (c - '0');
         ++i;
     }
-    // Commit the consumed prefix: s starts after the last digit.
+    // Commit the consumed prefix: s starts after the last digit
+    // (and past any optional sign).
     s = s.subspan(i, s.size() - i);
-    return static_cast<int>(acc);
+    if (negative) {
+        acc = -acc;
+    }
+    return acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -535,12 +681,15 @@ parse_uint_at(Span<const char>& s) noexcept {
 // ---------------------------------------------------------------------------
 // parse_double_at — streaming double-precision cursor.
 //
-// Same shape as parse_double (whole-span): integer part (zero or more
-// digits) + optional '.' + optional fractional digits + optional
-// 'e'/'E' exponent. On success, the span is shrunk to start AFTER
-// the consumed run (which might include the '.' and the exponent).
+// Same shape as parse_double (whole-span): optional sign + integer
+// part (zero or more digits) + optional '.' + optional fractional
+// digits + optional 'e'/'E' exponent. On success, the span is
+// shrunk to start AFTER the consumed run (which might include the
+// optional sign, the '.' and the exponent).
 //
-// Failure modes: same as parse_double.
+// Failure modes: same as parse_double. The optional-sign
+// acceptance is NEW in v0.14.0; bare signs now report NotADigit
+// (was LeadingSign in v0.13.0).
 //
 // A subtle difference vs the whole-span variant: trailing-garbage
 // is fine here. The whole-span parser rejects "1.5x" because it
@@ -554,24 +703,35 @@ parse_double_at(Span<const char>& s) noexcept {
     if (s.empty()) {
         return std::unexpected{ParseError::Empty};
     }
+
+    // Optional leading sign (NEW in v0.14.0).
+    std::size_t start = 0;
+    bool        negative = false;
     if (s.front() == '+' || s.front() == '-') {
-        return std::unexpected{ParseError::LeadingSign};
+        negative = (s.front() == '-');
+        start = 1;
     }
 
-    std::size_t  i = 0;
+    std::size_t  i = start;
     std::int64_t int_part = 0;
     bool         any_int_digits = false;
     while (i < s.size()) {
         char c = s[i];
         if (c < '0' || c > '9') break;
-        int_part = int_part * 10 + (c - '0');
-        if (int_part >
-            static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+        // Widened in v0.14.0: was INT_MAX, now INT64_MAX. Same
+        // rationale as parse_double above (the JSON dispatcher
+        // needs parse_double_at to accept INT64_MAX-shaped inputs).
+        if (int_part > std::numeric_limits<std::int64_t>::max() / 10
+            || (int_part == std::numeric_limits<std::int64_t>::max() / 10
+                && (c - '0') > static_cast<char>(
+                    std::numeric_limits<std::int64_t>::max() % 10))) {
             // Overflow on integer part — commit what's been consumed
-            // and report Overflow. Same contract as parse_int_at.
+            // (including the optional sign) and report Overflow. Same
+            // contract as parse_int_at.
             s = s.subspan(i + 1, s.size() - (i + 1));
             return std::unexpected{ParseError::Overflow};
         }
+        int_part = int_part * 10 + (c - '0');
         ++i;
         any_int_digits = true;
     }
@@ -599,12 +759,15 @@ parse_double_at(Span<const char>& s) noexcept {
         // If there were no fractional digits (e.g. "1."), we still
         // consumed the '.' — that's a valid run. Leave it consumed.
         (void)dot_pos;
-    } else if (!any_int_digits) {
+    } else if (i == start) {
         // No integer digits and no '.' — could still be an exponent
         // (rare but legal: "e5" would be a misformed input but
         // "1e5" already passed the integer phase). For the cursor
         // variant, we treat a leading non-digit as NotADigit — the
-        // caller can recover.
+        // caller can recover. (CHANGED in v0.14.0: the original
+        // v0.13.0 check was `!any_int_digits`, which is equivalent
+        // to `i == 0`; with the optional sign, we need `i == start`
+        // to mean "no integer digits after the sign".)
         return std::unexpected{ParseError::NotADigit};
     }
 
@@ -654,6 +817,10 @@ parse_double_at(Span<const char>& s) noexcept {
         for (std::int64_t k = 0; k < -e_total; ++k) value /= 10.0;
     }
 
+    // Apply leading-sign negation (NEW in v0.14.0).
+    if (negative) {
+        value = -value;
+    }
     return value;
 }
 

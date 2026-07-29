@@ -255,9 +255,44 @@ parse_value_at(Span<const char>& s) noexcept {
             return out;
         }
         default:
-            // Numbers: digit or leading '-'. parse_double_at rejects '+',
-            // so '+' falls through to the default and produces an error.
-            if ((front >= '0' && front <= '9') || front == '-') {
+            // Numbers: digit, '-', or '+'. parse_double_at accepts all
+            // three (sign is optional on the integer part). (NEW in
+            // v0.14.0: '+' was previously rejected by the dispatcher as
+            // UnexpectedChar — parse_double_at now accepts '+' as a
+            // no-op sign.)
+            if ((front >= '0' && front <= '9')
+                || front == '-'
+                || front == '+') {
+                // Peek ahead: if the numeric literal contains no '.'
+                // and no 'e'/'E', route it through parse_int_at
+                // (NEW in v0.14.0). This preserves int64 precision
+                // for integer-shaped literals — without this, an
+                // input like `-9223372036854775807` (= INT64_MIN+1)
+                // would round-trip through double and lose the +1
+                // (since double can't represent 2^63 exactly, the
+                // static_cast<int64_t> from the rounded double
+                // would produce INT64_MIN instead of INT64_MIN+1).
+                bool has_dot_or_exp = false;
+                {
+                    std::size_t j = (front == '+' || front == '-') ? 1 : 0;
+                    while (j < s.size() && s[j] >= '0' && s[j] <= '9') ++j;
+                    if (j < s.size() && (s[j] == '.' || s[j] == 'e' || s[j] == 'E')) {
+                        has_dot_or_exp = true;
+                    }
+                }
+                if (!has_dot_or_exp) {
+                    // Pure integer literal: route through parse_int_at
+                    // for full int64 precision. The cursor variant
+                    // returns int64_t directly (no double round-trip).
+                    auto i = parse_int_at(s);
+                    if (!i) {
+                        s = saved;
+                        return std::unexpected{i.error()};
+                    }
+                    JsonValue out;
+                    out.value = *i;
+                    return out;
+                }
                 auto d = parse_double_at(s);
                 if (!d) {
                     s = saved;
