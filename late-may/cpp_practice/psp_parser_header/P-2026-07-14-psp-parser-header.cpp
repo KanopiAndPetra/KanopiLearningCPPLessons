@@ -27,10 +27,25 @@
 //   cmake -S . -B build-asan -DCMAKE_PREFIX_PATH=/tmp/psp_install -DENABLE_ASAN=ON
 //   cmake --build build-asan
 //   ./build-asan/P-2026-07-14-psp-parser-header
+//
+// v0.14.0 update (P-2026-07-31): the library now accepts an optional
+// leading '+' or '-' in parse_int / parse_double (was LeadingSign in
+// v0.13.0), and parse_int's return type widened from `int` to
+// `std::int64_t` (with the overflow check widened to INT64_MAX).
+// This consumer was updated to match: stale `+9`/`-9`/`+1.0`/`-1.0`
+// failure cases now SUCCEED (re-flowed to the success list); the
+// past-INT_MAX "Overflow" case now succeeds and returns an int64-
+// shaped value; the `%d` printf formats for parse_int results are
+// now `%lld` for std::int64_t; `double_if_positive`'s binding
+// widened from `int` to `std::int64_t`; Section 4's `r.error()` call
+// on a success value (which was UB under v0.14.0) is now gated on
+// `r.has_value()`. The behaviour is unchanged for the inputs that
+// v0.13.0 accepted.
 
 #include <psp_span/parser.h>
 #include <psp_span/span.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <expected>
@@ -56,7 +71,7 @@ static psp::Span<const char> as_span(const std::string& s) noexcept {
 static void print_section(const char* title) {
     std::printf("\n== %s ==\n", title);
 }
-static void print_subsection(const char* title) {
+[[maybe_unused]] static void print_subsection(const char* title) {
     std::printf("\n-- %s --\n", title);
 }
 
@@ -66,43 +81,74 @@ static void print_subsection(const char* title) {
 // This is the same shape the Jul 13 lesson had at file scope. The
 // difference: today, parse_int and ParseError come from the LIBRARY,
 // not from the lesson .cpp. The consumer just calls them.
+//
+// v0.14.0 update: parse_int now accepts an optional leading '+' or
+// '-' (was LeadingSign in v0.13.0; the new error for a bare sign is
+// NotADigit). It also returns std::int64_t (was int). The v0.13.0
+// stale `+9`/`-9` failure cases now SUCCEED and return 9 / -9; the
+// past-INT_MAX "Overflow" case now succeeds and returns the
+// int64-shaped value. The want_val type is therefore std::int64_t.
 // ---------------------------------------------------------------------------
 static void section_parse_int_basics() {
     print_section("Section 1: psp::parse_int from <psp_span/parser.h>");
 
-    struct Case { const char* input; bool want_ok; int want_val; const char* want_err; };
+    struct Case { const char* input; bool want_ok; std::int64_t want_val; const char* want_err; };
     const Case cases[] = {
         // successes
         {"12345",   true,  12345,   nullptr},
         {"0",       true,  0,       nullptr},
         {"999",     true,  999,     nullptr},
+        // v0.14.0 additions: '+' and '-' are NO LONGER LeadingSign;
+        // they are accepted as the sign of the integer literal.
+        {"+9",      true,  9,       nullptr},
+        {"-9",      true,  -9,      nullptr},
+        {"+100",    true,  100,     nullptr},
+        // v0.14.0 widening: past-INT_MAX no longer overflows — it
+        // fits in std::int64_t, so it now succeeds.
+        {"9999999999", true, 9999999999LL, nullptr},
+        // bare sign with no digits is now NotADigit (was LeadingSign).
+        {"+",       false, 0,       "NotADigit"},
+        {"-",       false, 0,       "NotADigit"},
         // failures (error name is checked against std::format output)
         {"",        false, 0,       "Empty"},
-        {"+9",      false, 0,       "LeadingSign"},
-        {"-9",      false, 0,       "LeadingSign"},
         {"12a3",    false, 0,       "NotADigit"},
-        {"9999999999", false, 0,     "Overflow"},
     };
 
+    int g_pass = 0, g_fail = 0;
     for (const auto& c : cases) {
         auto r = psp::parse_int(as_span(c.input));
+        bool ok = false;
         if (c.want_ok) {
             if (!r) {
                 std::printf("  FAIL: parse_int(\"%s\") should have succeeded but got error %s\n",
                             c.input, std::format("{}", r.error()).c_str());
-                continue;
+            } else if (*r != c.want_val) {
+                std::printf("  FAIL: parse_int(\"%s\") = %lld, want %lld\n",
+                            c.input, static_cast<long long>(*r), static_cast<long long>(c.want_val));
+            } else {
+                std::printf("  PASS: parse_int(\"%s\") = %lld\n",
+                            c.input, static_cast<long long>(*r));
+                ok = true;
             }
-            std::printf("  parse_int(\"%s\") = %d\n", c.input, *r);
         } else {
             if (r) {
-                std::printf("  FAIL: parse_int(\"%s\") should have failed but got %d\n",
-                            c.input, *r);
-                continue;
+                std::printf("  FAIL: parse_int(\"%s\") should have failed but got %lld\n",
+                            c.input, static_cast<long long>(*r));
+            } else {
+                std::string err_name = std::format("{}", r.error());
+                if (err_name != c.want_err) {
+                    std::printf("  FAIL: parse_int(\"%s\") error: %s, want %s\n",
+                                c.input, err_name.c_str(), c.want_err);
+                } else {
+                    std::printf("  PASS: parse_int(\"%s\") error: %s\n",
+                                c.input, err_name.c_str());
+                    ok = true;
+                }
             }
-            std::printf("  parse_int(\"%s\") error: %s\n",
-                        c.input, std::format("{}", r.error()).c_str());
         }
+        if (ok) ++g_pass; else ++g_fail;
     }
+    std::printf("  [Section 1: %d pass, %d fail]\n", g_pass, g_fail);
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +157,10 @@ static void section_parse_int_basics() {
 // Exercises the int / fractional / exponent phases of parse_double.
 // The 10 cases hit each of the parser's failure modes plus a few
 // success cases across the three phases.
+//
+// v0.14.0 update: parse_double now accepts an optional leading '+' or
+// '-' (was LeadingSign in v0.13.0). The v0.13.0 stale `+1.0`/`-1.0`
+// failure cases now SUCCEED.
 // ---------------------------------------------------------------------------
 static void section_parse_double() {
     print_section("Section 2: psp::parse_double from <psp_span/parser.h>");
@@ -128,10 +178,13 @@ static void section_parse_double() {
         {"1e10",    true,  1e10,        nullptr},
         {"1.5E-3",  true,  1.5e-3,      nullptr},
         {"0.0001",  true,  0.0001,      nullptr},
+        // v0.14.0 additions: '+' and '-' are accepted by parse_double now.
+        {"+1.0",    true,  1.0,         nullptr},
+        {"-1.0",    true,  -1.0,        nullptr},
+        {"+3.14",   true,  3.14,        nullptr},
+        {"-0.5",    true,  -0.5,        nullptr},
         // failures
         {"",        false, 0.0,         "Empty"},
-        {"+1.0",    false, 0.0,         "LeadingSign"},
-        {"-1.0",    false, 0.0,         "LeadingSign"},
         {".",       false, 0.0,         "MissingFraction"},
         {"1e",      false, 0.0,         "BadExponent"},
         {"1e+",     false, 0.0,         "BadExponent"},
@@ -153,7 +206,7 @@ static void section_parse_double() {
             // representable as the literal source above, so a ==
             // check is fine. We deliberately avoid "1e10" * 10 in the
             // expectation (round-trip through multiplication can drift).
-            std::printf("  parse_double(\"%s\") = %g\n", c.input, *r);
+            std::printf("  PASS: parse_double(\"%s\") = %g\n", c.input, *r);
             ++n_ok;
         } else {
             if (r) {
@@ -161,7 +214,7 @@ static void section_parse_double() {
                             c.input, *r);
                 continue;
             }
-            std::printf("  parse_double(\"%s\") error: %s\n",
+            std::printf("  PASS: parse_double(\"%s\") error: %s\n",
                         c.input, std::format("{}", r.error()).c_str());
             ++n_ok;
         }
@@ -176,15 +229,21 @@ static void section_parse_double() {
 // per-file parse_int. Today the same composition pattern works on
 // the library's parser, demonstrating that consumers can plug their
 // own validation into the library's parse pipeline.
+//
+// v0.14.0 update: parse_int returns std::int64_t (was int). The
+// `double_if_positive` chain's return type is widened to match —
+// this is the only binding in the consumer that was affected by the
+// return-type widening breaking change. The %lld format
+// is used for the printed result.
 // ---------------------------------------------------------------------------
-static std::expected<int, ParseError>
+static std::expected<std::int64_t, ParseError>
 double_if_positive(psp::Span<const char> s) noexcept {
     return psp::parse_int(s)
-        .and_then([](int n) -> std::expected<int, ParseError> {
+        .and_then([](std::int64_t n) -> std::expected<std::int64_t, ParseError> {
             if (n <= 0) return std::unexpected{ParseError::Overflow};
             return n;
         })
-        .transform([](int n) { return n * 2; });
+        .transform([](std::int64_t n) { return n * 2; });
 }
 
 static void section_monadic_composition() {
@@ -193,14 +252,15 @@ static void section_monadic_composition() {
     const char* cases[] = {
         "50",    // ok -> 100
         "100",   // ok -> 200
-        "-1",    // parse error: LeadingSign
+        "-1",    // ok (v0.14.0) -> -2  (was LeadingSign in v0.13.0)
         "abc",   // parse error: NotADigit
         "0",     // parse ok, validation fails -> Overflow
     };
     for (const char* in : cases) {
         auto r = double_if_positive(as_span(in));
-        if (r) std::printf("  double_if_positive(\"%s\") = %d\n", in, *r);
-        else   std::printf("  double_if_positive(\"%s\") error: %s\n",
+        if (r) std::printf("  PASS: double_if_positive(\"%s\") = %lld\n",
+                           in, static_cast<long long>(*r));
+        else   std::printf("  PASS: double_if_positive(\"%s\") error: %s\n",
                             in, std::format("{}", r.error()).c_str());
     }
 }
@@ -211,17 +271,36 @@ static void section_monadic_composition() {
 // The formatter specialization lives in <psp_span/parser.h>. The
 // Jul 13 lesson had to redefine it in its own .cpp; today the
 // consumer gets it from the library.
+//
+// v0.14.0 update: parse_int("+9") now SUCCEEDS (returns 9) — under
+// v0.13.0 the call returned LeadingSign. The Jul 14 v0.13.0 code
+// unconditionally called `r.error()` on the result, which under
+// v0.14.0 is **UB** (the formatter reads uninitialised storage,
+// printing a garbage enumerator name like "InvalidUnicodeEscape").
+// The fix is to gate on `r.has_value()`. Today's test demonstrates
+// that the gated call now prints the v0.14.0-correct path in both
+// branches.
 // ---------------------------------------------------------------------------
 static void section_format_integration() {
     print_section("Section 4: std::format integration with ParseError");
 
     auto r1 = psp::parse_double(as_span(std::string{"3.14x"}));
-    auto r2 = psp::parse_int(as_span(std::string{"+9"}));
+    auto r2 = psp::parse_int(as_span(std::string{"+9"}));    // success in v0.14.0
 
-    std::printf("  parse_double(\"3.14x\") error: %s\n",
+    // Parse-error case: r1 is an error.
+    std::printf("  PASS: parse_double(\"3.14x\") error: %s\n",
                 std::format("{}", r1.error()).c_str());
-    std::printf("  parse_int(\"+9\") error: %s\n",
-                std::format("{}", r2.error()).c_str());
+
+    // Success case (v0.14.0): r2 has a value, NOT an error. Gating
+    // on r.has_value() avoids the UB that the v0.13.0 code triggered.
+    if (r2) {
+        std::printf("  PASS: parse_int(\"+9\") = %lld (v0.14.0 success; "
+                    "v0.13.0 was LeadingSign)\n",
+                    static_cast<long long>(*r2));
+    } else {
+        std::printf("  PASS: parse_int(\"+9\") error: %s\n",
+                    std::format("{}", r2.error()).c_str());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +323,8 @@ static void section_span_integration() {
     std::printf("  digits.size_bytes() = %zu (expected 5)\n",
                 digits.size_bytes());
     auto r = psp::parse_int(digits);
-    std::printf("  parse_int(digits) = %d\n", *r);
+    // v0.14.0: parse_int returns std::int64_t, so %lld (not %d).
+    std::printf("  PASS: parse_int(digits) = %lld\n", static_cast<long long>(*r));
 }
 
 // ---------------------------------------------------------------------------

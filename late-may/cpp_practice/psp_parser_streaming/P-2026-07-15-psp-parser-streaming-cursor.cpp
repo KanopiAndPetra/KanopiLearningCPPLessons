@@ -40,6 +40,17 @@
 //   cmake -S . -B build-asan -DCMAKE_PREFIX_PATH=/tmp/psp_install -DENABLE_ASAN=ON
 //   cmake --build build-asan
 //   ./build-asan/P-2026-07-15-psp-parser-streaming-cursor
+//
+// v0.14.0 update (P-2026-07-31): parse_int_at now accepts an
+// optional leading '+' or '-' (was LeadingSign in v0.13.0) and its
+// return type widened from `int` to `std::int64_t`; parse_double_at
+// likewise accepts an optional leading sign. parse_uint_at is
+// unchanged in API. Stale `+9`/`-9`/`+1.0`/`-1.0` failure cases
+// now SUCCEED; the past-INT_MAX `99999999999` "Overflow" case now
+// succeeds and returns the int64-shaped value. The `%d` printf
+// formats for parse_int_at results are now `%lld` for
+// std::int64_t. Behaviour is unchanged for the inputs v0.13.0
+// accepted.
 
 #include <psp_span/parser.h>
 #include <psp_span/span.h>
@@ -87,25 +98,37 @@ static void print_section(const char* title) {
 //
 // The interesting cases are the trailing-garbage ones ("123abc") —
 // those exercise the "consume what you can, leave the rest" contract.
+//
+// v0.14.0 update: parse_int_at now accepts an optional leading '+' or
+// '-' (was LeadingSign in v0.13.0); its return type widened from
+// `int` to `std::int64_t`. The v0.13.0 stale `+9`/`-9` failure cases
+// now SUCCEED; the past-INT_MAX `99999999999` Overflow case now
+// SUCCEEDS and returns the int64-shaped value. The want_val field is
+// therefore std::int64_t, and the printf format is `%lld`.
 // ---------------------------------------------------------------------------
 static void section_parse_int_at() {
     print_section("Section 1: psp::parse_int_at — cursor advances past digits");
 
-    struct Case { std::string input; bool want_ok; int want_val; const char* want_err; };
+    struct Case { std::string input; bool want_ok; std::int64_t want_val; const char* want_err; };
     const Case cases[] = {
         {"12345",      true,  12345,   nullptr},     // pure digits, fully consumed
         {"0",          true,  0,       nullptr},     // single zero
         {"7",          true,  7,       nullptr},     // single digit
         {"123abc",     true,  123,     nullptr},     // trailing garbage — cursor leaves "abc"
         {"42,17,99",   true,  42,      nullptr},     // CSV-style first token
+        // v0.14.0 additions: '+' and '-' are accepted by parse_int_at now.
+        {"+9",         true,  9,       nullptr},
+        {"-9",         true,  -9,      nullptr},
+        {"+100 abc",   true,  100,     nullptr},
+        // v0.14.0 widening: past-INT_MAX no longer overflows — it fits
+        // in std::int64_t, so it now succeeds.
+        {"99999999999",true,  99999999999LL, nullptr},
         {"",           false, 0,       "Empty"},
-        {"+9",         false, 0,       "LeadingSign"},
-        {"-9",         false, 0,       "LeadingSign"},
         {"abc",        false, 0,       "NotADigit"}, // not a single digit at the front
         {"  42",       false, 0,       "NotADigit"}, // leading whitespace is not a digit
-        {"99999999999",false, 0,       "Overflow"},  // > INT_MAX
     };
 
+    int g_pass = 0, g_fail = 0;
     for (const auto& c : cases) {
         psp::Span<const char> s = as_span(c.input);
         std::string orig = c.input;
@@ -115,30 +138,39 @@ static void section_parse_int_at() {
             if (!r) {
                 std::printf("  FAIL: parse_int_at(\"%s\") should have succeeded but got %s\n",
                             orig.c_str(), std::format("{}", r.error()).c_str());
+                ++g_fail;
                 continue;
             }
             if (*r != c.want_val) {
-                std::printf("  FAIL: parse_int_at(\"%s\") = %d, want %d\n",
-                            orig.c_str(), *r, c.want_val);
+                std::printf("  FAIL: parse_int_at(\"%s\") = %lld, want %lld\n",
+                            orig.c_str(),
+                            static_cast<long long>(*r),
+                            static_cast<long long>(c.want_val));
+                ++g_fail;
                 continue;
             }
-            std::printf("  parse_int_at(\"%s\") = %d, s now = \"%s\" (advanced %zu)\n",
-                        orig.c_str(), *r, span_to_string(s).c_str(),
+            std::printf("  PASS: parse_int_at(\"%s\") = %lld, s now = \"%s\" (advanced %zu)\n",
+                        orig.c_str(),
+                        static_cast<long long>(*r),
+                        span_to_string(s).c_str(),
                         orig.size() - s.size());
+            ++g_pass;
         } else {
             if (r) {
-                std::printf("  FAIL: parse_int_at(\"%s\") should have failed but got %d\n",
-                            orig.c_str(), *r);
+                std::printf("  FAIL: parse_int_at(\"%s\") should have failed but got %lld\n",
+                            orig.c_str(), static_cast<long long>(*r));
+                ++g_fail;
                 continue;
             }
-            auto err_name = std::format("{}", r.error());
+            std::string err_name = std::format("{}", r.error());
             if (err_name != c.want_err) {
                 std::printf("  FAIL: parse_int_at(\"%s\") got error %s, want %s\n",
                             orig.c_str(), err_name.c_str(), c.want_err);
+                ++g_fail;
                 continue;
             }
             // Distinguish three s-mutation outcomes on failure:
-            //   unchanged  = s == orig              (Empty / LeadingSign / NotADigit)
+            //   unchanged  = s == orig              (Empty / NotADigit)
             //   advanced   = s.size() < orig.size() (Overflow — cursor committed the consumed prefix)
             //   rewoound   = s.size() > orig.size() (should never happen — would be a bug)
             std::string rem = span_to_string(s);
@@ -146,10 +178,12 @@ static void section_parse_int_at() {
             if (rem == orig)         verdict = "unchanged";
             else if (s.size() < orig.size()) verdict = "advanced (overflow committed)";
             else                     verdict = "REWOUND BUG!";
-            std::printf("  parse_int_at(\"%s\") = error:%s, s = \"%s\" (%s)\n",
+            std::printf("  PASS: parse_int_at(\"%s\") = error:%s, s = \"%s\" (%s)\n",
                         orig.c_str(), err_name.c_str(), rem.c_str(), verdict);
+            ++g_pass;
         }
     }
+    std::printf("  [Section 1: %d pass, %d fail]\n", g_pass, g_fail);
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +192,11 @@ static void section_parse_int_at() {
 // Difference vs parse_int_at: '+' is ACCEPTED (no-op), '-' is REJECTED
 // as LeadingSign. The same cursor-advances / failure-leaves-s-unchanged
 // contract applies.
+//
+// v0.14.0 update: parse_uint_at is UNCHANGED in API. The '+' it
+// accepted in v0.13.0 is still accepted (no-op); '-' is still
+// rejected as LeadingSign. Section 2's test cases were carried over
+// unchanged from v0.13.0.
 // ---------------------------------------------------------------------------
 static void section_parse_uint_at() {
     print_section("Section 2: psp::parse_uint_at — unsigned cursor");
@@ -176,6 +215,7 @@ static void section_parse_uint_at() {
         {"",           false, 0u,        "Empty"},
     };
 
+    int g_pass = 0, g_fail = 0;
     for (const auto& c : cases) {
         psp::Span<const char> s = as_span(c.input);
         std::string orig = c.input;
@@ -185,32 +225,44 @@ static void section_parse_uint_at() {
             if (!r) {
                 std::printf("  FAIL: parse_uint_at(\"%s\") should have succeeded but got %s\n",
                             orig.c_str(), std::format("{}", r.error()).c_str());
+                ++g_fail;
                 continue;
             }
             if (*r != c.want_val) {
                 std::printf("  FAIL: parse_uint_at(\"%s\") = %u, want %u\n",
                             orig.c_str(), *r, c.want_val);
+                ++g_fail;
                 continue;
             }
-            std::printf("  parse_uint_at(\"%s\") = %u, s now = \"%s\" (advanced %zu)\n",
+            std::printf("  PASS: parse_uint_at(\"%s\") = %u, s now = \"%s\" (advanced %zu)\n",
                         orig.c_str(), *r, span_to_string(s).c_str(),
                         orig.size() - s.size());
+            ++g_pass;
         } else {
             if (r) {
                 std::printf("  FAIL: parse_uint_at(\"%s\") should have failed but got %u\n",
                             orig.c_str(), *r);
+                ++g_fail;
                 continue;
             }
-            auto err_name = std::format("{}", r.error());
+            std::string err_name = std::format("{}", r.error());
+            if (err_name != c.want_err) {
+                std::printf("  FAIL: parse_uint_at(\"%s\") got error %s, want %s\n",
+                            orig.c_str(), err_name.c_str(), c.want_err);
+                ++g_fail;
+                continue;
+            }
             std::string rem = span_to_string(s);
             const char* verdict;
             if (rem == orig)                  verdict = "unchanged";
             else if (s.size() < orig.size())  verdict = "advanced (overflow committed)";
             else                              verdict = "REWOUND BUG!";
-            std::printf("  parse_uint_at(\"%s\") = error:%s, s = \"%s\" (%s)\n",
+            std::printf("  PASS: parse_uint_at(\"%s\") = error:%s, s = \"%s\" (%s)\n",
                         orig.c_str(), err_name.c_str(), rem.c_str(), verdict);
+            ++g_pass;
         }
     }
+    std::printf("  [Section 2: %d pass, %d fail]\n", g_pass, g_fail);
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +272,10 @@ static void section_parse_uint_at() {
 // cases. Compare against parse_double (the whole-span variant from
 // Jul 14): "1.5x" is REJECTED by parse_double but ACCEPTED by
 // parse_double_at (which leaves "x" in `s`).
+//
+// v0.14.0 update: parse_double_at now accepts an optional leading
+// '+' or '-' (was LeadingSign in v0.13.0). The v0.13.0 stale
+// `+1.0`/`-1.0` failure cases now SUCCEED.
 // ---------------------------------------------------------------------------
 static void section_parse_double_at() {
     print_section("Section 3: psp::parse_double_at — double cursor");
@@ -235,14 +291,18 @@ static void section_parse_double_at() {
         {"1.5e-3",    true,  1.5e-3,     nullptr, 1e-12},
         {"1.5x",      true,  1.5,        nullptr, 1e-9},  // trailing garbage — cursor leaves "x"
         {"1.5,2.5,3.5", true, 1.5,       nullptr, 1e-9},  // CSV-style first token
+        // v0.14.0 additions: '+' and '-' are accepted by parse_double_at now.
+        {"+1.0",      true,  1.0,        nullptr, 0.0},
+        {"-1.0",      true,  -1.0,       nullptr, 0.0},
+        {"+3.14",     true,  3.14,       nullptr, 1e-9}, // v0.14.0: signed exponent is unchanged; show +3.14 alone parses cleanly
+        {"-0.5rest",  true,  -0.5,       nullptr, 1e-9},
         {"",          false, 0.0,        "Empty", 0.0},
-        {"+1.0",      false, 0.0,        "LeadingSign", 0.0},
-        {"-1.0",      false, 0.0,        "LeadingSign", 0.0},
         {".",         false, 0.0,        "MissingFraction", 0.0},
         {"1e",        false, 0.0,        "BadExponent", 0.0},
         {"1.2.3",     true,  1.2,        nullptr, 1e-9},  // stops at second '.'
     };
 
+    int g_pass = 0, g_fail = 0;
     for (const auto& c : cases) {
         psp::Span<const char> s = as_span(c.input);
         std::string orig = c.input;
@@ -252,33 +312,45 @@ static void section_parse_double_at() {
             if (!r) {
                 std::printf("  FAIL: parse_double_at(\"%s\") should have succeeded but got %s\n",
                             orig.c_str(), std::format("{}", r.error()).c_str());
+                ++g_fail;
                 continue;
             }
             double diff = (*r > c.want_val) ? (*r - c.want_val) : (c.want_val - *r);
             if (diff > c.tol) {
                 std::printf("  FAIL: parse_double_at(\"%s\") = %g, want %g\n",
                             orig.c_str(), *r, c.want_val);
+                ++g_fail;
                 continue;
             }
-            std::printf("  parse_double_at(\"%s\") = %g, s now = \"%s\" (advanced %zu)\n",
+            std::printf("  PASS: parse_double_at(\"%s\") = %g, s now = \"%s\" (advanced %zu)\n",
                         orig.c_str(), *r, span_to_string(s).c_str(),
                         orig.size() - s.size());
+            ++g_pass;
         } else {
             if (r) {
                 std::printf("  FAIL: parse_double_at(\"%s\") should have failed but got %g\n",
                             orig.c_str(), *r);
+                ++g_fail;
                 continue;
             }
-            auto err_name = std::format("{}", r.error());
+            std::string err_name = std::format("{}", r.error());
+            if (err_name != c.want_err) {
+                std::printf("  FAIL: parse_double_at(\"%s\") got error %s, want %s\n",
+                            orig.c_str(), err_name.c_str(), c.want_err);
+                ++g_fail;
+                continue;
+            }
             std::string rem = span_to_string(s);
             const char* verdict;
             if (rem == orig)                  verdict = "unchanged";
             else if (s.size() < orig.size())  verdict = "advanced (overflow committed)";
             else                              verdict = "REWOUND BUG!";
-            std::printf("  parse_double_at(\"%s\") = error:%s, s = \"%s\" (%s)\n",
+            std::printf("  PASS: parse_double_at(\"%s\") = error:%s, s = \"%s\" (%s)\n",
                         orig.c_str(), err_name.c_str(), rem.c_str(), verdict);
+            ++g_pass;
         }
     }
+    std::printf("  [Section 3: %d pass, %d fail]\n", g_pass, g_fail);
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +364,9 @@ static void section_parse_double_at() {
 //
 // We don't use std::ranges yet (this lesson is about the cursor API,
 // not about range adapters), so a plain while-loop is fine.
+//
+// v0.14.0 update: parse_int_at returns std::int64_t, so the %d
+// printf format for the int result is now %lld.
 // ---------------------------------------------------------------------------
 static void section_csv_walk() {
     print_section("Section 4: walking a CSV row with parse_int_at");
@@ -317,7 +392,8 @@ static void section_csv_walk() {
                 break;
             }
             if (!first) std::printf(", ");
-            std::printf("%d", *r);
+            // v0.14.0: parse_int_at returns std::int64_t, so %lld.
+            std::printf("%lld", static_cast<long long>(*r));
             first = false;
             // Skip any non-digit characters (commas, whitespace, etc.)
             // between tokens. A stricter parser would require exactly
@@ -338,6 +414,9 @@ static void section_csv_walk() {
 // We call parse_int_at, then parse_double_at, alternating, until the
 // buffer is empty. This shows the two primitives compose in the same
 // buffer without interfering with each other.
+//
+// v0.14.0 update: parse_int_at returns std::int64_t, so the %d
+// printf format is now %lld in the int step.
 // ---------------------------------------------------------------------------
 static void section_mixed_walk() {
     print_section("Section 5: alternating parse_int_at / parse_double_at");
@@ -361,8 +440,10 @@ static void section_mixed_walk() {
                             step, std::format("{}", r.error()).c_str());
                 break;
             }
-            std::printf("    step %d (int): %d, remainder = \"%s\"\n",
-                        step, *r, span_to_string(s).c_str());
+            // v0.14.0: parse_int_at returns std::int64_t, so %lld.
+            std::printf("    step %d (int): %lld, remainder = \"%s\"\n",
+                        step, static_cast<long long>(*r),
+                        span_to_string(s).c_str());
         } else {
             auto r = psp::parse_double_at(s);
             if (!r) {
@@ -384,6 +465,10 @@ static void section_mixed_walk() {
 // macros are still active. The streaming variants return the SAME
 // expected<T, ParseError> as the whole-span variants, so the size
 // probes are identical to the Jul 14 lesson's.
+//
+// v0.14.0 update: parse_int_at returns std::int64_t (was int), so
+// `sizeof(std::expected<std::int64_t, ParseError>)` is reported
+// alongside the unchanged `int` / `unsigned` / `double` rows.
 // ---------------------------------------------------------------------------
 static void section_probes() {
     print_section("Section 6: sizeof / feature probes");
@@ -391,6 +476,7 @@ static void section_probes() {
     std::printf("  sizeof(int)                                       = %zu\n", sizeof(int));
     std::printf("  sizeof(unsigned)                                  = %zu\n", sizeof(unsigned));
     std::printf("  sizeof(double)                                    = %zu\n", sizeof(double));
+    std::printf("  sizeof(std::int64_t)                              = %zu\n", sizeof(std::int64_t));
     std::printf("  sizeof(ParseError)                                = %zu\n", sizeof(ParseError));
     std::printf("  sizeof(psp::Span<const char>)                     = %zu\n", sizeof(psp::Span<const char>));
     std::printf("  sizeof(std::expected<int, ParseError>)            = %zu\n",
@@ -399,6 +485,9 @@ static void section_probes() {
                 sizeof(std::expected<unsigned, ParseError>));
     std::printf("  sizeof(std::expected<double, ParseError>)         = %zu\n",
                 sizeof(std::expected<double, ParseError>));
+    // v0.14.0: parse_int_at's return type widened from int to int64_t.
+    std::printf("  sizeof(std::expected<std::int64_t, ParseError>)   = %zu\n",
+                sizeof(std::expected<std::int64_t, ParseError>));
 #if defined(__cpp_lib_expected)
     std::printf("  __cpp_lib_expected                                = %ld\n",
                 static_cast<long>(__cpp_lib_expected));
@@ -416,6 +505,6 @@ int main() {
     section_csv_walk();
     section_mixed_walk();
     section_probes();
-    std::printf("\n[psp_parser_streaming_consumer: all 6 sections complete]\n");
+    std::printf("\n[psp_parser_streaming_consumer: all 6 sections complete, v0.14.0]\n");
     return 0;
 }
