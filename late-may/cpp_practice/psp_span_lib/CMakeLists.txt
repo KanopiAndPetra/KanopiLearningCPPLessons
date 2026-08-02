@@ -63,8 +63,8 @@
 
 cmake_minimum_required(VERSION 3.16)
 project(psp_span_lib
-    VERSION 0.14.0
-    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (whole-span and streaming numeric cursor + non-numeric cursor + JSON-scalar token cursors with std::expected<T, ParseError>; v0.14.0 adds optional leading-sign acceptance and widens parse_int to std::int64_t + INT64_MAX overflow) + a complete general JSON parser header (<psp_span/json.h>: JsonValue sum type, parse_value_at/parse_array_at/parse_object_at, json_to_string, operator==/!=, ParseError::DuplicateKey typed) + a JSON Pointer (RFC 6901) + JSON Patch (RFC 6902) header (<psp_span/json_ext.h>: psp::json_pointer::split / to_string / resolve / resolve_mut; psp::json_patch::patch; psp::json_patch::parse_patch_document (RFC 6902 §3 wire-format parser); file-scope ::JsonExtError (8 enumerators) + ::JsonPatchOp (RFC 6902 tagged-union of 6 ops) + ::JsonPatchError (13 enumerators) with their std::formatter specialisations); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
+    VERSION 0.15.0
+    DESCRIPTION "psp_span static library with explicit Span<int>, Span<const int>, Span<double> instantiations + a parser header (whole-span and streaming numeric cursor + non-numeric cursor + JSON-scalar token cursors with std::expected<T, ParseError>; v0.14.0 adds optional leading-sign acceptance and widens parse_int to std::int64_t + INT64_MAX overflow) + a complete general JSON parser header (<psp_span/json.h>: JsonValue sum type, parse_value_at/parse_array_at/parse_object_at, json_to_string, operator==/!=, ParseError::DuplicateKey typed) + a JSON Pointer (RFC 6901) + JSON Patch (RFC 6902) header (<psp_span/json_ext.h>: psp::json_pointer::split / to_string / resolve / resolve_mut; psp::json_patch::patch; psp::json_patch::parse_patch_document (RFC 6902 §3 wire-format parser); psp::json_patch::serialise_patch_document (RFC 6902 §3 wire-format writer; NEW in v0.15.0); file-scope ::JsonExtError (8 enumerators) + ::JsonPatchOp (RFC 6902 tagged-union of 6 ops) + ::JsonPatchError (13 enumerators) with their std::formatter specialisations); installable; find_package()-able; CPack-redistributable; bundles License + Readme"
     LANGUAGES CXX
 )
 
@@ -270,6 +270,22 @@ install(FILES
 )
 
 message(STATUS "==================================================")
+# 2026-08-02: bumped 0.14.0 -> 0.15.0 — <psp_span/json_ext.h>'s
+# RFC 6902 wire-format layer now ships the WRITER (the mirror
+# image of the v0.13.0 parser) in the library proper:
+# psp::json_patch::serialise_patch_document(span<JsonPatchOp>)
+# -> std::string. The function was first designed and exercised
+# in the Jul 24 consumer
+# (P-2026-07-24-psp-json-patch-serialiser); the Jul 27 consumer
+# (P-2026-07-27-psp-json-v014-promotion) re-inlined it as
+# op_writer; v0.15.0 is the header promotion. No new error
+# enumerators are added (the writer is infallible — the in-memory
+# ops are valid by construction). The Pointer + Patch + Patch-
+# parser halves from v0.13.0 are unchanged; v0.15.0 is a strict
+# superset. The promotion is a single ~50-line inline function
+# in <psp_span/json_ext.h>, mechanically lifted from the
+# proven-in-consumer code.
+#
 # 2026-07-27: bumped 0.13.0 -> 0.14.0 — <psp_span/parser.h>'s four
 # numeric parsers now accept an optional leading sign ('+' or '-').
 # parse_int / parse_int_at: return type widened from int to
@@ -481,6 +497,16 @@ message(STATUS "==================================================")
 # (~30 lines of code) and a strict superset of v0.13.0. The Jul 25
 # consumer (P-2026-07-25-psp-json-negative-numbers.cpp) proved the
 # v0.14.0 shape end-to-end before this header was promoted.
+#
+# Bumped version 0.14.0 -> 0.15.0 because <psp_span/json_ext.h>'s
+# RFC 6902 layer now also ships the WRITER
+# (psp::json_patch::serialise_patch_document) — the mirror image
+# of the v0.13.0 parser (psp::json_patch::parse_patch_document).
+# The function was first designed and exercised in the Jul 24
+# consumer (P-2026-07-24-psp-json-patch-serialiser); the Jul 27
+# consumer (P-2026-07-27-psp-json-v014-promotion) re-inlined a
+# copy. v0.15.0 is the header promotion. The change is mechanical
+# (~50 lines of inline code) and a strict superset of v0.14.0.
 #
 # Disable the STGZ generator that CPack *auto-enables* when you say
 # "TGZ". STGZ is "Self-extracting Tar GZ" — a shell-script wrapper

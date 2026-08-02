@@ -17,9 +17,11 @@
 //   - ::JsonExtError (8 enumerators + std::formatter spec)
 //   - ::JsonPatchOp     (RFC 6902 tagged-union of 6 ops)
 //   - ::JsonPatchError  (13 enumerators + std::formatter spec)
-//   - psp::json_patch::patch(JsonValue&, ops) (RFC 6902 §1 engine)
-//   - psp::json_patch::parse_patch_document(string_view)
+//   psp::json_patch::patch(JsonValue&, ops) (RFC 6902 §1 engine)
+//   psp::json_patch::parse_patch_document(string_view)
 //                                  (RFC 6902 §3 wire-format parser)
+//   psp::json_patch::serialise_patch_document(span<JsonPatchOp>)
+//                                  (RFC 6902 §3 wire-format writer)
 //
 // What's NOT in this header
 // -------------------------
@@ -43,6 +45,26 @@
 //                       (BadDocument, MissingField, WrongType).
 //                       The Pointer + Patch halves from v0.12.0
 //                       are unchanged; v0.13.0 is a strict
+//                       superset.
+// v0.15.0 (2026-08-02): RFC 6902 §3 wire-format writer
+//                       (psp::json_patch::serialise_patch_document).
+//                       The mirror image of v0.13.0's parser.
+//                       Takes a std::span<const JsonPatchOp>,
+//                       returns a std::string (the RFC 6902 §3
+//                       wire-format text). The function is
+//                       infallible: the in-memory ops are valid
+//                       by construction. The design was proven
+//                       in the Jul 24 consumer
+//                       (P-2026-07-24-psp-json-patch-serialiser)
+//                       and the Jul 27 consumer
+//                       (P-2026-07-27-psp-json-v014-promotion
+//                       inlined a copy as op_writer); today's
+//                       promotion lifts it into the header.
+//                       No new error enumerators; the writer
+//                       shares the v0.13.0 error vocabulary by
+//                       virtue of being infallible. Pointer +
+//                       Patch + Patch-parser halves from v0.13.0
+//                       are unchanged; v0.15.0 is a strict
 //                       superset.
 
 #ifndef PSP_SPAN_JSON_EXT_H_INCLUDED
@@ -1201,6 +1223,127 @@ parse_patch_document(std::string_view doc) noexcept {
     }
 
     return out;
+}
+
+// ===========================================================================
+// serialise_patch_document — RFC 6902 §3 wire-format WRITER
+// (NEW in v0.15.0 — the mirror image of parse_patch_document)
+// ===========================================================================
+//
+// The natural counterpart to parse_patch_document above.
+// Takes a span of ops in memory; returns a std::string holding
+// the RFC 6902 §3 wire-format text (a JSON array of op
+// objects). The two functions are not the same shape — the
+// parser returns std::expected<vector, error> because wire-
+// format parsing can fail, but the writer returns a bare
+// std::string because the in-memory ops are valid by
+// construction (they came out of the parser or were built by
+// the caller with the known RFC 6902 §4 field shape). The
+// type system enforces that — the variant alternatives ARE
+// the 6 op kinds, and each struct has exactly the fields
+// RFC 6902 §4 mandates.
+//
+// The function is a thin wrapper around json_to_string over
+// a synthesised std::vector<JsonValue> (one object per op).
+// We do not duplicate the v0.10.0 pretty-printer; we build the
+// right JsonValue tree and hand it to json_to_string.
+//
+// Field shape (RFC 6902 §4):
+//   add     { "op": "add",     "path": ..., "value": ... }
+//   remove  { "op": "remove",  "path": ...                }
+//   replace { "op": "replace", "path": ..., "value": ... }
+//   move    { "op": "move",    "from": ..., "path": ...   }
+//   copy    { "op": "copy",    "from": ..., "path": ...   }
+//   test    { "op": "test",    "path": ..., "value": ... }
+//
+// The dispatch uses BOTH a switch (on op.kind) and std::get
+// (to extract the typed struct). The tag tells us which
+// FIELDS the op needs; std::get is the standard way to pull
+// the right struct out of a variant. The combination is
+// clearer than a std::visit overload set (which would just
+// forward to the same payload) because the tag-to-fields
+// mapping is fixed by RFC 6902 §4 and reads naturally as a
+// switch.
+//
+// RFC 6902 §3 doesn't say the fields must be in a specific
+// order inside an op object. The writer emits them in a
+// consistent order (the natural reading order from the RFC —
+// "op" first, then "path" / "from", then "value"). The
+// std::map<std::string, JsonValue> iteration order is
+// alphabetical, so the printed JSON object shows keys in
+// alphabetical order ("from", "op", "path", "value"). The
+// parser doesn't care; the output is still RFC 6902 §3
+// compliant.
+//
+// The design was proven in the Jul 24 consumer
+// (P-2026-07-24-psp-json-patch-serialiser); the Jul 27
+// consumer (P-2026-07-27-psp-json-v014-promotion) re-inlined
+// a copy as op_writer. v0.15.0 is the header promotion.
+
+inline std::string
+serialise_patch_document(std::span<const JsonPatchOp> ops) {
+    std::vector<psp::JsonValue> out;
+    out.reserve(ops.size());
+
+    for (const auto& op : ops) {
+        std::map<std::string, psp::JsonValue> obj;
+
+        // The "op" tag is always a string. We dispatch on
+        // op.kind to know which OTHER fields to emit.
+        switch (op.kind) {
+            case OpKind::Add: {
+                const auto& a = std::get<AddOp>(op.data);
+                obj["op"]    = psp::JsonValue{std::string{"add"}};
+                obj["path"]  = psp::JsonValue{a.path};
+                obj["value"] = a.value;  // copy the JsonValue tree
+                break;
+            }
+            case OpKind::Remove: {
+                const auto& r = std::get<RemoveOp>(op.data);
+                obj["op"]   = psp::JsonValue{std::string{"remove"}};
+                obj["path"] = psp::JsonValue{r.path};
+                break;
+            }
+            case OpKind::Replace: {
+                const auto& r = std::get<ReplaceOp>(op.data);
+                obj["op"]    = psp::JsonValue{std::string{"replace"}};
+                obj["path"]  = psp::JsonValue{r.path};
+                obj["value"] = r.value;
+                break;
+            }
+            case OpKind::Move: {
+                const auto& m = std::get<MoveOp>(op.data);
+                obj["op"]   = psp::JsonValue{std::string{"move"}};
+                obj["from"] = psp::JsonValue{m.from};
+                obj["path"] = psp::JsonValue{m.path};
+                break;
+            }
+            case OpKind::Copy: {
+                const auto& c = std::get<CopyOp>(op.data);
+                obj["op"]   = psp::JsonValue{std::string{"copy"}};
+                obj["from"] = psp::JsonValue{c.from};
+                obj["path"] = psp::JsonValue{c.path};
+                break;
+            }
+            case OpKind::Test: {
+                const auto& t = std::get<TestOp>(op.data);
+                obj["op"]    = psp::JsonValue{std::string{"test"}};
+                obj["path"]  = psp::JsonValue{t.path};
+                obj["value"] = t.value;
+                break;
+            }
+        }
+
+        out.push_back(psp::JsonValue{std::move(obj)});
+    }
+
+    // Hand the assembled vector-of-objects to the v0.10.0
+    // pretty-printer. json_to_string walks the std::vector
+    // alternative of the JsonValue variant, recurses into
+    // each element's std::map, and emits the RFC 6902 §3
+    // wire-format text.
+    psp::JsonValue doc{std::move(out)};
+    return psp::json_to_string(doc, 0);
 }
 
 }  // namespace json_patch

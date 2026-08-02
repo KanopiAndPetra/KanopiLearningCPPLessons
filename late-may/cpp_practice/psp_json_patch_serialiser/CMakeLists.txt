@@ -45,12 +45,16 @@ project(psp_json_patch_serialiser_consumer
     LANGUAGES CXX
 )
 
-# Require >= 0.13 (not >= 0.12) because the consumer depends on
-# psp::json_patch::parse_patch_document (the v0.13.0 parser half
-# the writer is round-tripping against). The writer itself is
-# local to the consumer, so no library API is required for it —
-# only the parser half.
-find_package(psp_span_lib 0.13 REQUIRED)
+# Require >= 0.15 (not >= 0.13) because the consumer exercises
+# psp::json_patch::serialise_patch_document from the LIBRARY
+# PROPER (the v0.15.0 promotion). The Jul 24 lesson defined
+# the function locally; today's P-2026-08-02 lesson
+# (psp_json_patch_writer_v015) lifted it into the header, and
+# this consumer was updated to drop the local copy in lockstep.
+# The function's body is byte-for-byte equivalent to the
+# original Jul 24 local definition; only the location of the
+# definition changed.
+find_package(psp_span_lib 0.15 REQUIRED)
 
 add_executable(P-2026-07-24-psp-json-patch-serialiser
     P-2026-07-24-psp-json-patch-serialiser.cpp

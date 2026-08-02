@@ -129,95 +129,23 @@
 // serialise_patch_document — RFC 6902 §3 wire-format writer
 // ===========================================================================
 //
-// Lives at file scope (the same scope as parse_patch_document
-// would when it lives in the library) so std::format can
-// specialise for any error type we might add. Returns
-// std::string because the writer is infallible (the in-memory
-// ops are already valid by construction — they came out of the
-// parser or were built by the caller with known shape).
+// As of the P-2026-08-02 lesson
+// (psp_json_patch_writer_v015), this function lives in the
+// LIBRARY PROPER (v0.15.0's <psp_span/json_ext.h>). The Jul 24
+// consumer originally defined it here as a local inline
+// function; the v0.15.0 promotion lifts it into the header.
 //
-// The function:
+// To avoid a redefinition error, the LOCAL copy is removed and
+// the consumer now calls psp::json_patch::serialise_patch_document
+// from the library. The function is identical in behaviour
+// (byte-for-byte equivalent body); only the location of the
+// definition changed. See the v0.15.0 consumer
+// (P-2026-08-02-psp-json-patch-writer-v015.cpp) for the
+// "library-proper" round-trip proof.
 //
-//   1. Builds a std::vector<JsonValue>, one JsonValue per op.
-//      Each JsonValue holds a std::map<std::string, JsonValue>
-//      of the right field shape (kind-tagged).
-//   2. Hands the vector to psp::json_to_string, which pretty-
-//      prints it as a JSON array.
-//
-// json_to_string's existing pretty-printer is exactly the right
-// primitive here — it already handles null/bool/int/double/
-// string/array/object/nested-recursion and the surrounding
-// "[ ... ]" structure. We reuse it; we do not duplicate it.
-
-namespace psp::json_patch {
-
-inline std::string serialise_patch_document(
-    std::span<const JsonPatchOp> ops) {
-    std::vector<psp::JsonValue> out;
-    out.reserve(ops.size());
-
-    for (const auto& op : ops) {
-        std::map<std::string, psp::JsonValue> obj;
-
-        // The "op" tag is always a string. We dispatch on
-        // op.kind to know which *other* fields to emit.
-        switch (op.kind) {
-            case OpKind::Add: {
-                const auto& a = std::get<AddOp>(op.data);
-                obj["op"]   = psp::JsonValue{std::string{"add"}};
-                obj["path"] = psp::JsonValue{a.path};
-                obj["value"] = a.value;  // copy the JsonValue tree
-                break;
-            }
-            case OpKind::Remove: {
-                const auto& r = std::get<RemoveOp>(op.data);
-                obj["op"]   = psp::JsonValue{std::string{"remove"}};
-                obj["path"] = psp::JsonValue{r.path};
-                break;
-            }
-            case OpKind::Replace: {
-                const auto& r = std::get<ReplaceOp>(op.data);
-                obj["op"]   = psp::JsonValue{std::string{"replace"}};
-                obj["path"] = psp::JsonValue{r.path};
-                obj["value"] = r.value;
-                break;
-            }
-            case OpKind::Move: {
-                const auto& m = std::get<MoveOp>(op.data);
-                obj["op"]   = psp::JsonValue{std::string{"move"}};
-                obj["from"] = psp::JsonValue{m.from};
-                obj["path"] = psp::JsonValue{m.path};
-                break;
-            }
-            case OpKind::Copy: {
-                const auto& c = std::get<CopyOp>(op.data);
-                obj["op"]   = psp::JsonValue{std::string{"copy"}};
-                obj["from"] = psp::JsonValue{c.from};
-                obj["path"] = psp::JsonValue{c.path};
-                break;
-            }
-            case OpKind::Test: {
-                const auto& t = std::get<TestOp>(op.data);
-                obj["op"]   = psp::JsonValue{std::string{"test"}};
-                obj["path"] = psp::JsonValue{t.path};
-                obj["value"] = t.value;
-                break;
-            }
-        }
-
-        out.push_back(psp::JsonValue{std::move(obj)});
-    }
-
-    // Hand the assembled vector-of-objects to the v0.10.0
-    // pretty-printer. json_to_string walks the std::vector
-    // alternative of the JsonValue variant, recurses into
-    // each element's std::map, and emits the RFC 6902 §3
-    // wire-format text.
-    psp::JsonValue doc{std::move(out)};
-    return psp::json_to_string(doc, 0);
-}
-
-}  // namespace psp::json_patch
+// The rest of this file (Section 1-8 tests, helpers,
+// back-compat checks) is unchanged from Jul 24 and exercises
+// the writer through the library.
 
 // ===========================================================================
 // Helpers (test infrastructure — no patch code).
