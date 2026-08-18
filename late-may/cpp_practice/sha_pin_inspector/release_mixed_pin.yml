@@ -1,0 +1,48 @@
+# release_mixed_pin.yml — psp_span_lib release workflow with a MIX of
+# SHA-pinned and floating action references.
+#
+# This file is the WARN fixture for today's P-2026-08-18 lesson
+# (`sha_pin_inspector`). It pins one action (`actions/checkout`) to
+# a SHA but leaves the other two on floating tags. This is a
+# realistic mid-migration state — an owner is in the process of
+# pinning actions but hasn't finished.
+#
+# The C++ inspector classifies this fixture as "passes the
+# at-least-one-pinned check but fails the all-must-be-pinned
+# check", and the report lists WHICH actions are still floating
+# so the human can finish the migration.
+
+name: Release psp_span_lib (mixed pinning — partial migration)
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    name: Build + publish
+    runs-on: ubuntu-latest
+
+    steps:
+      # SHA-pinned (good).
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      # Floating (still needs pinning).
+      - name: Install CMake
+        uses: jurplio/install-cmake@v1
+
+      # Floating (still needs pinning).
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            late-may/cpp_practice/psp_span_lib/build/psp_span_lib-*-Linux.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          name: psp_span_lib ${{ github.ref_name }}

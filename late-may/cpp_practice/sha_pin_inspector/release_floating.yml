@@ -1,0 +1,59 @@
+# release_floating.yml — psp_span_lib release workflow with FLOATING
+# (un-pinned) action references.
+#
+# This file is the BAD fixture for today's P-2026-08-18 lesson
+# (`sha_pin_inspector`). Every `uses:` line is pinned to a moving
+# tag (`@v4`, `@main`, `@v2`) rather than to an immutable commit
+# SHA. A compromised or hijacked action tag would silently affect
+# this workflow.
+#
+# Compare byte-for-byte against `release_sha_pinned.yml`:
+#
+#   release_sha_pinned.yml   | release_floating.yml
+#   ─────────────────────────|─────────────────────────────
+#   uses: actions/checkout    | uses: actions/checkout@v4
+#     @b4ffde65f46336ab88eb5 |
+#    3be808477a3936bae11     |
+#   uses: jurplio/install-    | uses: jurplio/install-cmake@v1
+#    cmake@bb98d9d2a06f1a1d7 |
+#    bb8de451d8f94f4f6e9bbc6 |
+#   uses: softprops/action-   | uses: softprops/action-gh-release@v2
+#    gh-release@72f2c6456b   |
+#    077edf9fec2136a92f72f0b |
+#    5b25b16                 |
+#
+# The SHAs above are 40 lowercase hex chars. The floating tags
+# below are NOT. The C++ inspector in today's lesson checks
+# exactly this distinction.
+
+name: Release psp_span_lib (floating tags — DO NOT USE)
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    name: Build + publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CMake
+        uses: jurplio/install-cmake@v1
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            late-may/cpp_practice/psp_span_lib/build/psp_span_lib-*-Linux.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          name: psp_span_lib ${{ github.ref_name }}

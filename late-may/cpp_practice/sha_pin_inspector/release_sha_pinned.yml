@@ -1,0 +1,65 @@
+# release_sha_pinned.yml — psp_span_lib release workflow with SHA-pinned
+# actions.
+#
+# This file is the GOOD fixture for today's P-2026-08-18 lesson
+# (`sha_pin_inspector`). Every `uses:` line is pinned to a 40-character
+# git commit SHA, not to a floating `@v4` / `@main` / `@v2.x` tag.
+#
+# SHA pins are the supply-chain-security recommendation for CI
+# workflows: a compromised action version (e.g. an attacker who
+# pushes to `actions/checkout`'s `@v4` tag) cannot affect us because
+# our workflow references the immutable SHA, not the mutable tag.
+#
+# The SHAs below are the real, current commit IDs for each action
+# at the time this lesson was written. They are NOT a curated
+# "trust" list — they are example pins. To re-pin a workflow:
+#
+#   1. Visit the action's repo (e.g. github.com/actions/checkout)
+#   2. Pick the commit you want to pin (typically the HEAD of
+#      the major-version branch you currently use)
+#   3. Copy its full 40-char SHA from the GitHub UI
+#   4. Replace the `@<sha>` below
+#
+# The lesson does NOT verify the SHAs exist on GitHub — that is a
+# separate concern (an offline SHA-validity check is a future
+# lesson). Today's inspector verifies the *shape* of the pin
+# (40-hex-chars, no whitespace, no `@v` prefix).
+
+name: Release psp_span_lib (SHA-pinned)
+
+# permissions: contents=write is REQUIRED for softprops/action-gh-release.
+# This is unchanged from the Jul 6 / Jul 8 lessons.
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    name: Build + publish
+    runs-on: ubuntu-latest
+
+    steps:
+      # SHA-pinned: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      # (this is the v4.1.1 commit on the v4 branch as of 2024)
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+
+      # SHA-pinned: jurplio/install-cmake@bb98d9d2a06f1a1d7bb8de451d8f94f4f6e9bbc6
+      - name: Install CMake
+        uses: jurplio/install-cmake@bb98d9d2a06f1a1d7bb8de451d8f94f4f6e9bbc6
+
+      # SHA-pinned: softprops/action-gh-release@72f2c6456b077edf9fec2136a92f72f0b5b25b16
+      # (this is the v2.2.2 commit on the v2 branch as of 2024)
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@72f2c6456b077edf9fec2136a92f72f0b5b25b16
+        with:
+          files: |
+            late-may/cpp_practice/psp_span_lib/build/psp_span_lib-*-Linux.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          name: psp_span_lib ${{ github.ref_name }}
