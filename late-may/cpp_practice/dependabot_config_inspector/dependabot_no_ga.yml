@@ -1,0 +1,43 @@
+# dependabot_no_ga.yml — the BAD fixture
+#
+# This dependabot.yml tracks npm and pip, but NOT github-actions.
+# R1 (the headline rule) fails. R2..R6 stay PASS because the
+# loops over github-actions blocks see zero blocks (an empty
+# bad-list satisfies the "no violations" branch).
+#
+# This is a realistic anti-pattern: a team that sets up
+# Dependabot for their application dependencies but forgets to
+# enable it for GitHub Actions. The lesson's whole point is to
+# catch this before the supply chain drifts.
+
+version: 2
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    groups:
+      npm-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+    labels:
+      - "dependencies"
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    groups:
+      pip:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"

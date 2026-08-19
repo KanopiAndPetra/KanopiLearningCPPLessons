@@ -1,0 +1,26 @@
+# dependabot_minimal.yml — the BAD fixture
+#
+# A github-actions block exists, but EVERY other rule fails.
+# This is the "minimum-effort Dependabot config" pattern:
+# someone added the block because they saw it in a tutorial,
+# but they did not think about PR flood, conventional commit
+# messages, PR limits, or filter labels.
+#
+# R1 — PASS (block present)
+# R2 — FAIL (interval is monthly, not in {daily, weekly})
+# R3 — FAIL (no groups: map)
+# R4 — FAIL (commit-message.prefix is "bump", not conventional)
+# R5 — FAIL (open-pull-requests-limit is missing entirely)
+# R6 — FAIL (no labels: array)
+#
+# All five sub-rules fail. R1 is the only rule that passes.
+
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "bump"
